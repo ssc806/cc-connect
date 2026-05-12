@@ -27,6 +27,7 @@ func parseInboundMessage(raw []byte) (inboundMessage, bool) {
 		ConversationID: firstString(payload, "conversationId", "chatId", "sessionId", "target", "from", "to"),
 		Text:           strings.TrimSpace(text),
 		ContentType:    readInt(payload["contentType"], payload["type"]),
+		MessageVersion: firstInt(payload, "sessionVersion", "messageVersion", "version"),
 		Type:           msgType,
 		Raw:            append([]byte(nil), raw...),
 	}
@@ -54,6 +55,31 @@ func firstString(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// firstInt returns the first of keys present in m parsed as an int, or nil if
+// none are present/parseable. Mirrors YonClaw's readOptionalNumber, which keeps
+// "absent" distinct from 0 so the outbound reply-quote can send null.
+func firstInt(m map[string]any, keys ...string) *int {
+	for _, key := range keys {
+		v, ok := m[key]
+		if !ok {
+			continue
+		}
+		switch t := v.(type) {
+		case float64:
+			n := int(t)
+			return &n
+		case int:
+			n := t
+			return &n
+		case string:
+			if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+				return &n
+			}
+		}
+	}
+	return nil
 }
 
 func readInt(values ...any) int {

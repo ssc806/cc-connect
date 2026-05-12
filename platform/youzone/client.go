@@ -88,12 +88,18 @@ func (c *client) getWSS(ctx context.Context, robotID string) (string, error) {
 	return wss, nil
 }
 
-func (c *client) sendMessage(ctx context.Context, robotID, content string) (sendResult, error) {
+func (c *client) sendMessage(ctx context.Context, robotID string, msg outboundMessage) (sendResult, error) {
+	// No conversation/recipient field: a YOUZONE "claw robot" is bound to one
+	// conversation, so robotId alone identifies the target — same as YonClaw's
+	// claw-robot/client/sendMessage. See outbound.go for the payload rationale.
 	payload := map[string]any{
 		"id":          robotID,
 		"robotId":     robotID,
-		"content":     strings.TrimSpace(content),
-		"contentType": 2,
+		"content":     msg.Content,
+		"contentType": msg.ContentType,
+	}
+	if strings.TrimSpace(msg.Extend) != "" {
+		payload["extend"] = msg.Extend
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

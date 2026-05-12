@@ -33,6 +33,27 @@ func TestParseInboundDMessageExtractsNestedContent(t *testing.T) {
 	if msg.ContentType != 2 {
 		t.Fatalf("ContentType = %d", msg.ContentType)
 	}
+	if msg.MessageVersion == nil || *msg.MessageVersion != 8 {
+		t.Fatalf("MessageVersion = %v, want 8", msg.MessageVersion)
+	}
+}
+
+func TestParseInboundMessageVersionFallsBackAcrossKeys(t *testing.T) {
+	msg, ok := parseInboundMessage([]byte(`{"id":"1","type":"dmessage","sender":"u1","content":"hi","messageVersion":3}`))
+	if !ok {
+		t.Fatal("parseInboundMessage() ok = false")
+	}
+	if msg.MessageVersion == nil || *msg.MessageVersion != 3 {
+		t.Fatalf("MessageVersion = %v, want 3", msg.MessageVersion)
+	}
+
+	msg, ok = parseInboundMessage([]byte(`{"id":"1","type":"dmessage","sender":"u1","content":"hi"}`))
+	if !ok {
+		t.Fatal("parseInboundMessage() ok = false")
+	}
+	if msg.MessageVersion != nil {
+		t.Fatalf("MessageVersion = %v, want nil", msg.MessageVersion)
+	}
 }
 
 func TestParseInboundMessageIgnoresAuthFrame(t *testing.T) {

@@ -54,6 +54,7 @@ type inboundMessage struct {
 	ConversationID string
 	Text           string
 	ContentType    int
+	MessageVersion *int // YOUZONE sessionVersion/messageVersion/version; nil when absent
 	Type           string
 	Raw            []byte
 }
@@ -63,4 +64,6 @@ type replyContext struct {
 	conversationID string
 	senderID       string
 	messageID      string
+	messageVersion *int   // carried for the outbound reply-quote header (see outbound.go)
+	replyText      string // inbound text, shown as the reply-quote preview
 }

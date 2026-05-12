@@ -72,7 +72,7 @@ func TestClientGetWSSParsesNestedResponse(t *testing.T) {
 	}
 }
 
-func TestClientSendMessageUsesYOUZONELocalHTTPPayload(t *testing.T) {
+func TestClientSendMessageUsesYOUZONEUniversalMessagePayload(t *testing.T) {
 	var payload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/yonbip-ec-link/claw-robot/client/sendMessage" {
@@ -89,15 +89,43 @@ func TestClientSendMessageUsesYOUZONELocalHTTPPayload(t *testing.T) {
 	defer server.Close()
 
 	client := newClient(testClientConfig(server.URL), server.Client())
-	result, err := client.sendMessage(context.Background(), "robot-1", "hello")
+	out, err := buildOutboundMessage("hello", replyContext{})
+	if err != nil {
+		t.Fatalf("buildOutboundMessage() error = %v", err)
+	}
+	result, err := client.sendMessage(context.Background(), "robot-1", out)
 	if err != nil {
 		t.Fatalf("sendMessage() error = %v", err)
 	}
 	if !result.Success || result.PacketID != "packet-1" || result.BusinessCode == nil || *result.BusinessCode != 200 {
 		t.Fatalf("result = %#v", result)
 	}
-	if payload["id"] != "robot-1" || payload["robotId"] != "robot-1" || payload["content"] != "hello" || payload["contentType"].(float64) != 2 {
-		t.Fatalf("payload = %#v", payload)
+	if payload["id"] != "robot-1" || payload["robotId"] != "robot-1" {
+		t.Fatalf("payload robot fields = %#v", payload)
+	}
+	if payload["contentType"].(float64) != float64(youzoneUniversalMessageContentType) {
+		t.Fatalf("contentType = %v, want %d", payload["contentType"], youzoneUniversalMessageContentType)
+	}
+	if payload["content"] != "hello" {
+		t.Fatalf("content (digest) = %v", payload["content"])
+	}
+	extend, ok := payload["extend"].(string)
+	if !ok || extend == "" {
+		t.Fatalf("extend = %#v, want non-empty JSON string", payload["extend"])
+	}
+	var parsedExtend youzoneExtend
+	if err := json.Unmarshal([]byte(extend), &parsedExtend); err != nil {
+		t.Fatalf("extend is not valid JSON: %v", err)
+	}
+	if parsedExtend.ExtendType != "universalMessage" || parsedExtend.CustomData == "" {
+		t.Fatalf("parsed extend = %#v", parsedExtend)
+	}
+	// The outbound HTTP body must not carry any conversation/recipient target:
+	// the robot id alone identifies the conversation (see outbound.go).
+	for _, k := range []string{"conversationId", "to", "target", "chatId", "robotUserId"} {
+		if _, present := payload[k]; present {
+			t.Fatalf("payload unexpectedly contains target field %q: %#v", k, payload)
+		}
 	}
 }
 

@@ -56,31 +56,48 @@ func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string) error 
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
 	slog.Info("youzone: websocket connected", "robot_id", robotID, "protocol", conn.Subprotocol())
 
-	connCtx, cancelPing := context.WithCancel(ctx)
-	done := make(chan struct{})
+	connCtx, cancel := context.WithCancel(ctx)
 	var writeMu sync.Mutex
+	var wg sync.WaitGroup
+
+	wg.Add(1)
 	go func() {
-		defer close(done)
+		defer wg.Done()
 		p.pingLoop(connCtx, conn, &writeMu)
 	}()
-	defer func() {
-		cancelPing()
+
+	// gorilla's conn.ReadMessage() ignores context cancellation, so the read
+	// loop below cannot be interrupted by Stop()/reload on its own. This
+	// watcher closes the socket when connCtx is cancelled (Stop, or the read
+	// loop exiting via cancel() below), which makes the blocked ReadMessage
+	// return promptly instead of leaking the goroutine and TCP connection until
+	// the server happens to disconnect.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-connCtx.Done()
 		writeMu.Lock()
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "stop"), time.Now().Add(time.Second))
 		writeMu.Unlock()
-		<-done
+		_ = conn.Close()
 	}()
 
+	var readErr error
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			return err
+			readErr = err
+			break
 		}
 		p.handleInbound(data)
 	}
+
+	cancel() // stop pingLoop and trigger the close watcher (no-op if Stop already did)
+	_ = conn.Close()
+	wg.Wait()
+	return readErr
 }
 
 func (p *Platform) pingLoop(ctx context.Context, conn wsConn, writeMu *sync.Mutex) {

@@ -72,8 +72,12 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 	p.mu.RLock()
 	robotID := p.cfg.robotID
 	p.mu.RUnlock()
-	if rc, ok := replyCtx.(replyContext); ok && strings.TrimSpace(rc.robotID) != "" {
-		robotID = rc.robotID
+	var rc replyContext
+	if v, ok := replyCtx.(replyContext); ok {
+		rc = v
+		if strings.TrimSpace(rc.robotID) != "" {
+			robotID = rc.robotID
+		}
 	}
 	if robotID == "" {
 		var err error
@@ -82,7 +86,11 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 			return err
 		}
 	}
-	_, err := p.client.sendMessage(ctx, robotID, content)
+	msg, err := buildOutboundMessage(content, rc)
+	if err != nil {
+		return fmt.Errorf("youzone: build outbound message: %w", err)
+	}
+	_, err = p.client.sendMessage(ctx, robotID, msg)
 	return err
 }
 
@@ -155,6 +163,8 @@ func (p *Platform) handleInbound(raw []byte) {
 			conversationID: msg.ConversationID,
 			senderID:       msg.SenderID,
 			messageID:      msg.MessageID,
+			messageVersion: msg.MessageVersion,
+			replyText:      msg.Text,
 		},
 	})
 }
