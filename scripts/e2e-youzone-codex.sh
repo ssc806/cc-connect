@@ -4,7 +4,11 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  YOUZONE_ACCESS_TOKEN=... scripts/e2e-youzone-codex.sh
+  YOUZONE_ACCESS_TOKEN=... \
+  YOUZONE_TENANT_ID=... \
+  YOUZONE_RECEIVER_ROBOT_ID=... \
+  YOUZONE_SENDER_ROBOT_ID=... \
+  scripts/e2e-youzone-codex.sh
 
 Runs a black-box YOUZONE -> cc-connect -> Codex -> YOUZONE test using two
 YOUZONE robots:
@@ -12,13 +16,14 @@ YOUZONE robots:
   sender robot   -> sends the nonce prompt via YOUZONE sendMessage
   receiver robot -> cc-connect listens via getWss + WebSocket/xmpp
 
-Required environment:
+Required environment (no defaults — point these at resources you own; the
+script sends a live test prompt to YOUZONE_SENDER_ROBOT_ID):
   YOUZONE_ACCESS_TOKEN             BIP/YouZone yht_access_token
+  YOUZONE_TENANT_ID                tenant id
+  YOUZONE_RECEIVER_ROBOT_ID        robot id cc-connect listens on (getWss + WebSocket)
+  YOUZONE_SENDER_ROBOT_ID          robot id the nonce prompt is sent from
 
 Optional environment:
-  YOUZONE_TENANT_ID                default: qyic8c7o
-  YOUZONE_RECEIVER_ROBOT_ID        default: 2537043383832543237
-  YOUZONE_SENDER_ROBOT_ID          default: 2537268491658461189
   YOUZONE_BASE_URL                 default: https://c2.yonyoucloud.com
   YOUZONE_API_PREFIX               default: /yonbip-ec-link
   YOUZONE_E2E_TIMEOUT_SEC          default: 240
@@ -50,17 +55,26 @@ require_cmd go
 require_cmd node
 require_cmd "${CODEX_BIN:-codex}"
 
-if [[ -z "${YOUZONE_ACCESS_TOKEN:-}" ]]; then
-  echo "YOUZONE_ACCESS_TOKEN is required" >&2
-  exit 2
-fi
+require_env() {
+  if [[ -z "${!1:-}" ]]; then
+    echo "$1 is required (no default — set it to a resource you own)" >&2
+    exit 2
+  fi
+}
+
+# No defaults for tenant/robot ids: this script sends a live prompt via
+# YOUZONE_SENDER_ROBOT_ID, so it must never fall back to someone else's robots.
+require_env YOUZONE_ACCESS_TOKEN
+require_env YOUZONE_TENANT_ID
+require_env YOUZONE_RECEIVER_ROBOT_ID
+require_env YOUZONE_SENDER_ROBOT_ID
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_URL="${YOUZONE_BASE_URL:-https://c2.yonyoucloud.com}"
 API_PREFIX="${YOUZONE_API_PREFIX:-/yonbip-ec-link}"
-TENANT_ID="${YOUZONE_TENANT_ID:-qyic8c7o}"
-RECEIVER_ROBOT_ID="${YOUZONE_RECEIVER_ROBOT_ID:-2537043383832543237}"
-SENDER_ROBOT_ID="${YOUZONE_SENDER_ROBOT_ID:-2537268491658461189}"
+TENANT_ID="$YOUZONE_TENANT_ID"
+RECEIVER_ROBOT_ID="$YOUZONE_RECEIVER_ROBOT_ID"
+SENDER_ROBOT_ID="$YOUZONE_SENDER_ROBOT_ID"
 TIMEOUT_SEC="${YOUZONE_E2E_TIMEOUT_SEC:-240}"
 CODEX_BIN="${CODEX_BIN:-codex}"
 
