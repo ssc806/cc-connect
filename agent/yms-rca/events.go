@@ -27,10 +27,18 @@ func (s *session) handleEvent(raw map[string]any) {
 		s.handleToolEnd(raw)
 	case "agent_start", "turn_start", "message_start":
 		slog.Debug("yms-rca: lifecycle", "type", t)
-	case "turn_end":
-		slog.Debug("yms-rca: turn_end")
 	case "agent_end":
 		s.handleAgentEnd(raw)
+	case "turn_end":
+		// turn_end fires only for agent-runtime turns (LLM calls). Slash
+		// commands like /debug-rpc-confirm DO NOT emit turn_end — pi-rpc's
+		// docs are explicit that turn_end is "Turn completes (includes
+		// assistant message and tool results)". The universal completion
+		// signal that covers both is `response command=prompt` (handled
+		// in handleResponse below). turn_end is still useful as a
+		// defensive emit point for LLM turns and to mirror agent_end.
+		s.maybeEmitTurnResult(nil)
+		s.busy.Store(false)
 	case "extension_ui_request":
 		s.handleExtensionUIRequest(raw)
 	case "extension_error":
@@ -59,6 +67,13 @@ func (s *session) handleResponse(raw map[string]any) {
 			s.updateContextUsage(data)
 		}
 	case "prompt":
+		// `response command=prompt` is pi-rpc's "prompt handler returned"
+		// signal. For LLM turns this fires AFTER agent_end / turn_end; for
+		// slash commands it fires BEFORE the trailing `message_end` carrying
+		// the result text. So we can't emit EventResult here without putting
+		// it ahead of the text. Instead: set promptAcked + clear busy now
+		// (pi-rpc is idle, next Send is safe), and let the message_end
+		// terminator emit the Result after the EventText.
 		if !success {
 			msg := asString(raw, "errorMessage", "")
 			if msg == "" && data != nil {
@@ -70,8 +85,11 @@ func (s *session) handleResponse(raw map[string]any) {
 				msg = "yms-rca: prompt failed"
 			}
 			s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg)})
-			s.busy.Store(false)
+			// Errors finalize immediately — no trailing text to wait for.
+			s.maybeEmitTurnResult(nil)
 		}
+		s.promptAcked.Store(true)
+		s.busy.Store(false)
 	}
 }
 
@@ -218,6 +236,16 @@ func (s *session) handleMessageEnd(raw map[string]any) {
 			if display {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			}
+			// Slash-command terminator: pi-rpc emits `response command=prompt`
+			// BEFORE this final message_end (see handleResponse — we set
+			// promptAcked there but defer the Result emit). Now that the
+			// trailing text has been delivered to the engine, emit the
+			// EventResult so the turn closes cleanly. The latch ensures
+			// LLM turns (which emit Result via agent_end / turn_end before
+			// the response/prompt ack) don't double-emit.
+			if s.promptAcked.Load() {
+				s.maybeEmitTurnResult(nil)
+			}
 		case "yms-rca.env-switch":
 			if display {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
@@ -290,20 +318,36 @@ func (s *session) handleToolEnd(raw map[string]any) {
 }
 
 func (s *session) handleAgentEnd(raw map[string]any) {
+	// agent_end fires once per LLM call and carries token usage. We do NOT
+	// clear busy here — the universal turn boundary is turn_end. Emit the
+	// EventResult now (with token usage); turn_end's emit will be a no-op
+	// thanks to maybeEmitTurnResult's atomic dedup.
+	s.maybeEmitTurnResult(raw)
+	// async refresh of context window after the LLM call.
+	go s.requestSessionStats()
+}
+
+// maybeEmitTurnResult emits EventResult{Done:true} exactly once per turn.
+// raw may be nil (slash-command turn) or the agent_end frame (carries usage).
+// Returns true if this call performed the emit.
+func (s *session) maybeEmitTurnResult(raw map[string]any) bool {
+	if !s.turnResultEmitted.CompareAndSwap(false, true) {
+		return false
+	}
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
-	if u, ok := raw["usage"].(map[string]any); ok {
-		if v, ok := numAny(u["input"]); ok {
-			evt.InputTokens = v
-		}
-		if v, ok := numAny(u["output"]); ok {
-			evt.OutputTokens = v
+	if raw != nil {
+		if u, ok := raw["usage"].(map[string]any); ok {
+			if v, ok := numAny(u["input"]); ok {
+				evt.InputTokens = v
+			}
+			if v, ok := numAny(u["output"]); ok {
+				evt.OutputTokens = v
+			}
 		}
 	}
 	s.emit(evt)
-	s.busy.Store(false)
-	// async refresh
-	go s.requestSessionStats()
+	return true
 }
 
 func (s *session) handleExtensionUIRequest(raw map[string]any) {
@@ -342,13 +386,14 @@ func (s *session) handleExtensionUIRequest(raw map[string]any) {
 }
 
 func (s *session) handleConfirmRequest(id, title, message string) {
-	switch s.currentMode() {
+	mode := s.currentMode()
+	switch mode {
 	case "yolo", "bypassPermissions":
 		_ = s.writeFrame(map[string]any{
 			"type": "extension_ui_response", "id": id, "confirmed": true,
 		})
 		s.emit(core.Event{Type: core.EventThinking,
-			Content: "yms-rca: auto-approved (yolo): " + title})
+			Content: fmt.Sprintf("yms-rca: auto-approved (%s): %s", mode, title)})
 	case "dontAsk":
 		_ = s.writeFrame(map[string]any{
 			"type": "extension_ui_response", "id": id, "confirmed": false,

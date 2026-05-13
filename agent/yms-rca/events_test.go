@@ -94,6 +94,9 @@ func TestHandleEvent_GetSessionStats(t *testing.T) {
 }
 
 func TestHandleEvent_PromptFailure(t *testing.T) {
+	// On prompt failure, expect both EventError (with message) AND
+	// EventResult{Done:true} so the engine can finalize the turn. busy
+	// must also be cleared.
 	s, _ := newTestSession(t, "default")
 	s.busy.Store(true)
 	s.handleEvent(map[string]any{
@@ -101,8 +104,20 @@ func TestHandleEvent_PromptFailure(t *testing.T) {
 		"data": map[string]any{"error": "boom"},
 	})
 	events := drainEvents(t, s, 100*time.Millisecond)
-	if len(events) != 1 || events[0].Type != core.EventError {
-		t.Fatalf("got: %+v", events)
+	var gotErr, gotResult bool
+	for _, e := range events {
+		if e.Type == core.EventError {
+			gotErr = true
+		}
+		if e.Type == core.EventResult && e.Done {
+			gotResult = true
+		}
+	}
+	if !gotErr {
+		t.Errorf("missing EventError; got %+v", events)
+	}
+	if !gotResult {
+		t.Errorf("missing EventResult{Done:true} on prompt failure; turn would never finalize")
 	}
 	if s.busy.Load() {
 		t.Errorf("busy not cleared after prompt failure")
@@ -113,6 +128,7 @@ func TestHandleEvent_AgentEnd(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.sessionID.Store("sid-1")
 	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
 	s.handleEvent(map[string]any{
 		"type":  "agent_end",
 		"usage": map[string]any{"input": 100.0, "output": 50.0},
@@ -130,8 +146,14 @@ func TestHandleEvent_AgentEnd(t *testing.T) {
 	if got.SessionID != "sid-1" || got.InputTokens != 100 || got.OutputTokens != 50 {
 		t.Errorf("unexpected: %+v", got)
 	}
+	// agent_end does NOT clear busy by itself — turn_end is the universal
+	// turn boundary. Subsequent turn_end should be the one that clears it.
+	if !s.busy.Load() {
+		t.Error("busy must remain set after agent_end (cleared on turn_end)")
+	}
+	s.handleEvent(map[string]any{"type": "turn_end"})
 	if s.busy.Load() {
-		t.Errorf("busy not cleared")
+		t.Error("busy not cleared on turn_end after agent_end")
 	}
 }
 
@@ -384,9 +406,12 @@ func TestHandleEvent_CustomEnvSwitch_DisplayFalseEmitsThinking(t *testing.T) {
 }
 
 func TestHandleEvent_AgentEnd_NoUsage(t *testing.T) {
+	// agent_end without a usage block still emits EventResult (with zero
+	// token counts) but does NOT clear busy — that happens at turn_end.
 	s, _ := newTestSession(t, "default")
 	s.sessionID.Store("sid-no-usage")
 	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
 	s.handleEvent(map[string]any{"type": "agent_end"})
 	evts := drainEvents(t, s, 100*time.Millisecond)
 	var ev *core.Event
@@ -401,8 +426,8 @@ func TestHandleEvent_AgentEnd_NoUsage(t *testing.T) {
 	if ev.InputTokens != 0 || ev.OutputTokens != 0 || ev.SessionID != "sid-no-usage" {
 		t.Errorf("unexpected: %+v", ev)
 	}
-	if s.busy.Load() {
-		t.Error("busy not cleared")
+	if !s.busy.Load() {
+		t.Error("busy must remain set after agent_end (cleared on turn_end)")
 	}
 }
 
@@ -427,6 +452,201 @@ func TestHandleEvent_ExtensionUI_NotifyPlain(t *testing.T) {
 	}
 }
 
+// Regression for code-review HIGH: a slash-command turn produces:
+//
+//  1. response/prompt success=true  → set promptAcked, clear busy
+//  2. message_end role=custom customType=yms-command → emit EventText
+//     AND emit EventResult (latched). Engine sees text BEFORE result,
+//     matching protocol order.
+//
+// pi-rpc does NOT emit turn_end / agent_end for slash commands, so
+// without this terminator the engine would never see EventResult and
+// busy would stay set, refusing the next Send.
+func TestHandleEvent_SlashCommandTurnTerminates(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.promptAcked.Store(false)
+
+	// 1. response/prompt success=true arrives FIRST in real protocol.
+	s.handleEvent(map[string]any{
+		"type": "response", "command": "prompt", "success": true,
+	})
+	if s.busy.Load() {
+		t.Error("busy not cleared on response/prompt")
+	}
+	if !s.promptAcked.Load() {
+		t.Error("promptAcked not set on response/prompt")
+	}
+	// Result not yet emitted — trailing text still pending.
+	evts := drainEvents(t, s, 50*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Errorf("Result emitted too early — would arrive before EventText: %+v", e)
+		}
+	}
+
+	// 2. message_end with the slash command result.
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"display":    true,
+			"customType": "yms-command",
+			"content":    []any{map[string]any{"text": "confirmed=false"}},
+		},
+	})
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	var idxText, idxResult = -1, -1
+	for i, e := range evts {
+		if e.Type == core.EventText {
+			idxText = i
+		}
+		if e.Type == core.EventResult && e.Done {
+			idxResult = i
+		}
+	}
+	if idxText < 0 {
+		t.Errorf("missing EventText: %+v", evts)
+	}
+	if idxResult < 0 {
+		t.Errorf("missing EventResult{Done:true}: %+v", evts)
+	}
+	if idxText >= 0 && idxResult >= 0 && idxText > idxResult {
+		t.Errorf("Result emitted before Text — engine would lose the slash-command output. Order: %+v", evts)
+	}
+}
+
+// Regression: an LLM turn (where agent_end fires BEFORE response/prompt)
+// must emit Result via agent_end with correct token usage. The later
+// response/prompt must be a no-op for Result (already latched).
+func TestHandleEvent_LLMTurn_AgentEndBeatsResponsePrompt(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.promptAcked.Store(false)
+
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 200.0, "output": 80.0},
+	})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+	s.handleEvent(map[string]any{
+		"type": "response", "command": "prompt", "success": true,
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var results []core.Event
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			results = append(results, e)
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 Result (latch), got %d: %+v", len(results), results)
+	}
+	if results[0].InputTokens != 200 || results[0].OutputTokens != 80 {
+		t.Errorf("token usage from agent_end lost: %+v", results[0])
+	}
+	if s.busy.Load() {
+		t.Error("busy not cleared")
+	}
+}
+
+// Regression for code-review HIGH: a slash-command turn (no agent_end)
+// must still clear busy and emit EventResult on turn_end, otherwise the
+// next Send is permanently refused with "previous turn still running".
+func TestHandleEvent_TurnEndClearsBusyForSlashCommands(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	// Simulate a turn in progress (Send would have set this).
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	// No agent_end (slash command) — just turn_end.
+	s.handleEvent(map[string]any{"type": "turn_end"})
+
+	if s.busy.Load() {
+		t.Error("busy not cleared on turn_end — slash-command turn would wedge the session")
+	}
+	// And we should see EventResult{Done:true}.
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var done bool
+	for _, e := range evts {
+		if e.Type == core.EventResult && e.Done {
+			done = true
+		}
+	}
+	if !done {
+		t.Errorf("expected EventResult{Done:true} on turn_end; got %+v", evts)
+	}
+}
+
+// Regression: an LLM turn (agent_end then turn_end) emits EventResult EXACTLY
+// once, with token usage from agent_end. turn_end must not double-emit.
+func TestHandleEvent_AgentEndThenTurnEnd_SingleResult(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.sessionID.Store("sid-1")
+
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 100.0, "output": 50.0},
+	})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+
+	if s.busy.Load() {
+		t.Error("busy not cleared")
+	}
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var results []core.Event
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			results = append(results, e)
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 EventResult, got %d: %+v", len(results), results)
+	}
+	if results[0].InputTokens != 100 || results[0].OutputTokens != 50 {
+		t.Errorf("token usage lost: %+v", results[0])
+	}
+}
+
+// Regression: Send resets the turn-emit latch so a second turn after a
+// first one (which emitted via agent_end) still emits its own EventResult.
+func TestSend_ResetsTurnEmitLatch(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.workDir = t.TempDir()
+
+	// First turn: agent_end + turn_end (latch becomes true).
+	if err := s.Send("first", nil, nil); err != nil {
+		t.Fatalf("Send first: %v", err)
+	}
+	s.handleEvent(map[string]any{"type": "agent_end"})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+	_ = drainEvents(t, s, 100*time.Millisecond)
+
+	// Second turn — Send should reset the latch so result can fire again.
+	if err := s.Send("second", nil, nil); err != nil {
+		t.Fatalf("Send second: %v", err)
+	}
+	if s.turnResultEmitted.Load() {
+		t.Error("Send did not reset turnResultEmitted for new turn")
+	}
+	s.handleEvent(map[string]any{"type": "turn_end"})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var done bool
+	for _, e := range evts {
+		if e.Type == core.EventResult && e.Done {
+			done = true
+		}
+	}
+	if !done {
+		t.Errorf("second turn's EventResult missing: %+v", evts)
+	}
+}
+
 func TestHandleEvent_PromptFailureUsesErrorMessage(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.busy.Store(true)
@@ -435,10 +655,16 @@ func TestHandleEvent_PromptFailureUsesErrorMessage(t *testing.T) {
 		"errorMessage": "rate limit",
 	})
 	evts := drainEvents(t, s, 100*time.Millisecond)
-	if len(evts) != 1 || evts[0].Type != core.EventError {
-		t.Fatalf("got %+v", evts)
+	var errEvt *core.Event
+	for i := range evts {
+		if evts[i].Type == core.EventError {
+			errEvt = &evts[i]
+		}
 	}
-	if !strings.Contains(evts[0].Error.Error(), "rate limit") {
-		t.Errorf("error text: %v", evts[0].Error)
+	if errEvt == nil {
+		t.Fatalf("missing EventError: %+v", evts)
+	}
+	if !strings.Contains(errEvt.Error.Error(), "rate limit") {
+		t.Errorf("error text: %v", errEvt.Error)
 	}
 }

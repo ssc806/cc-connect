@@ -230,6 +230,30 @@ func (a *Agent) SetWorkDir(dir string) {
 	slog.Info("yms-rca: work_dir changed", "work_dir", dir)
 }
 
+// ── core.WorkspaceAgentOptionSnapshotter ───────────────────
+
+// WorkspaceAgentOptions exports the constructor options needed to recreate
+// this agent for a different workspace. work_dir is intentionally omitted
+// per the interface contract — the engine sets it explicitly for each
+// bound workspace. All other constructor-only fields (cmd, provider, model,
+// thinking, mode, session_dir, session_file, offline, confirm_timeout_secs)
+// are included so duplicate agents don't silently fall back to defaults.
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return map[string]any{
+		"cmd":                  a.cmd,
+		"provider":             a.provider,
+		"model":                a.model,
+		"thinking":             a.thinking,
+		"mode":                 a.mode,
+		"session_dir":          a.sessionDir,
+		"session_file":         a.sessionFile,
+		"offline":              a.offline,
+		"confirm_timeout_secs": int(a.confirmTimeout / time.Second),
+	}
+}
+
 // ── core.MemoryFileProvider ────────────────────────────────
 
 func (a *Agent) ProjectMemoryFile() string {

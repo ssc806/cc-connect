@@ -122,11 +122,11 @@ loop:
 // to drive a real high-risk confirm round-trip WITHOUT touching an LLM.
 // The adapter must:
 //
-//	1. spawn the child with the debug env var
-//	2. send a "prompt" frame
-//	3. observe EventPermissionRequest
-//	4. answer via RespondPermission("deny")
-//	5. observe EventResult{Done:true} for the turn
+//  1. spawn the child with the debug env var
+//  2. send a "prompt" frame
+//  3. observe EventPermissionRequest
+//  4. answer via RespondPermission("deny")
+//  5. observe EventResult{Done:true} for the turn
 //
 // This mirrors the upstream smoke-rpc.mjs "decline" half but runs through
 // the cc-connect adapter end-to-end.
@@ -167,13 +167,17 @@ func TestIntegration_DebugRPCConfirmRoundTrip(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// /debug-rpc-confirm is a slash command (no LLM turn) — yms-rca emits the
-	// confirm request, our deny is round-tripped back, and the command's
-	// result message_end surfaces as EventText. There is no `agent_end`,
-	// so we don't wait for EventResult{Done}.
+	// /debug-rpc-confirm is a slash command (no LLM call). Expected flow:
+	//   1. EventPermissionRequest (title="High-risk operation")
+	//   2. (our deny goes back over stdin)
+	//   3. EventText "confirmed=false auto_approve=false"
+	//   4. turn_end → EventResult{Done:true}; busy cleared
+	// The Result-on-turn_end is the regression for the code-review HIGH
+	// finding: without it, busy stays set and the NEXT Send is refused.
 	gotPermission := false
 	gotAck := false
-	roundDeadline := time.After(15 * time.Second)
+	gotResult := false
+	roundDeadline := time.After(20 * time.Second)
 loop:
 	for {
 		select {
@@ -195,16 +199,20 @@ loop:
 					t.Errorf("RespondPermission(deny): %v", err)
 				}
 			case core.EventText:
-				// debug-rpc-confirm replies with a text confirming the decline.
 				if gotPermission {
 					gotAck = true
+				}
+			case core.EventResult:
+				if evt.Done {
+					gotResult = true
 					break loop
 				}
 			case core.EventError:
 				t.Logf("error event (tolerable for slash command): %v", evt.Error)
 			}
 		case <-roundDeadline:
-			t.Fatalf("timeout; perm=%v ack=%v", gotPermission, gotAck)
+			t.Fatalf("timeout; perm=%v ack=%v result=%v",
+				gotPermission, gotAck, gotResult)
 		}
 	}
 
@@ -214,14 +222,23 @@ loop:
 	if !gotAck {
 		t.Error("never received follow-up EventText after deny — round-trip broken")
 	}
+	if !gotResult {
+		t.Error("never received EventResult{Done:true} on turn_end — regression: busy would stay set, next Send would be refused")
+	}
+
+	// Verify the next Send is NOT refused — direct regression check for
+	// "previous turn still running" on slash-command turns.
+	if s, ok := sess.(*session); ok && s.busy.Load() {
+		t.Error("busy still set after slash-command turn — regression for code-review HIGH finding")
+	}
 }
 
 // TestIntegration_CloseTearsDownRealCLI verifies that Close on a healthy,
 // long-running `yms-rca rpc` subprocess:
 //
-//	1. terminates the child within 8s
-//	2. closes the Events() channel without panicking
-//	3. emits a final EventResult{Done:true} from readStdout cleanup
+//  1. terminates the child within 8s
+//  2. closes the Events() channel without panicking
+//  3. emits a final EventResult{Done:true} from readStdout cleanup
 //
 // This is the integration counterpart to TestClose_WriteFramePermanentlyBlocked
 // which uses a mock encoder.

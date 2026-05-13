@@ -130,13 +130,40 @@ func TestHandleConfirm_Yolo_AutoApprove(t *testing.T) {
 	if len(frames) != 1 || frames[0]["confirmed"] != true {
 		t.Fatalf("yolo should auto-approve; frames=%+v", frames)
 	}
-	// Should NOT emit EventPermissionRequest.
+	// Audit message must name the actual active mode.
+	var auditMsg string
 	select {
 	case evt := <-s.events:
 		if evt.Type == core.EventPermissionRequest {
 			t.Fatalf("yolo emitted EventPermissionRequest")
 		}
+		auditMsg = evt.Content
 	case <-time.After(50 * time.Millisecond):
+		t.Fatal("expected audit EventThinking")
+	}
+	if !strings.Contains(auditMsg, "(yolo)") {
+		t.Errorf("audit text wrong: %q", auditMsg)
+	}
+}
+
+// Regression for code-review LOW: bypassPermissions previously printed
+// "auto-approved (yolo)" in the audit trail — the message must reflect
+// the actual active mode.
+func TestHandleConfirm_BypassPermissions_AuditLabel(t *testing.T) {
+	s, _ := newTestSession(t, "bypassPermissions")
+	s.handleConfirmRequest("req-b", "rm", "msg")
+
+	evt, ok := waitFor(t, s, 200*time.Millisecond, func(e core.Event) bool {
+		return e.Type == core.EventThinking
+	})
+	if !ok {
+		t.Fatal("no audit EventThinking")
+	}
+	if !strings.Contains(evt.Content, "(bypassPermissions)") {
+		t.Errorf("audit should say bypassPermissions, got %q", evt.Content)
+	}
+	if strings.Contains(evt.Content, "(yolo)") {
+		t.Errorf("audit mislabeled as yolo: %q", evt.Content)
 	}
 }
 

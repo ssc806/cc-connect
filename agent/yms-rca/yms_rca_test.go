@@ -293,6 +293,85 @@ func TestAgent_Accessors(t *testing.T) {
 	}
 }
 
+// Regression for code-review MEDIUM: yms-rca has many constructor-only
+// fields (cmd, provider, thinking, session_dir, offline,
+// confirm_timeout_secs). Without WorkspaceAgentOptions, the engine would
+// silently drop them when re-creating the agent for another workspace.
+func TestAgent_WorkspaceAgentOptions_PreservesAllFields(t *testing.T) {
+	a, err := New(map[string]any{
+		"cmd":                  "/bin/sh",
+		"work_dir":             "/tmp/orig",
+		"model":                "yonyou/MiniMax",
+		"thinking":             "high",
+		"mode":                 "yolo",
+		"session_dir":          "/tmp/sd",
+		"session_file":         "",
+		"offline":              true,
+		"confirm_timeout_secs": 42,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	snap := a.(*Agent).WorkspaceAgentOptions()
+
+	// work_dir must NOT leak — the engine sets it per workspace.
+	if _, ok := snap["work_dir"]; ok {
+		t.Error("WorkspaceAgentOptions leaked work_dir; engine contract is to set it per workspace")
+	}
+
+	expect := map[string]any{
+		"cmd":                  "/bin/sh",
+		"model":                "yonyou/MiniMax",
+		"thinking":             "high",
+		"mode":                 "yolo",
+		"session_dir":          "/tmp/sd",
+		"offline":              true,
+		"confirm_timeout_secs": 42,
+	}
+	for k, want := range expect {
+		got, ok := snap[k]
+		if !ok {
+			t.Errorf("WorkspaceAgentOptions missing %q", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("WorkspaceAgentOptions[%q] = %v, want %v", k, got, want)
+		}
+	}
+}
+
+// Round-trip: feeding WorkspaceAgentOptions() (plus work_dir) back into
+// New() reproduces an equivalent agent — proves the engine's recreate path
+// will be functional for bound workspaces.
+func TestAgent_WorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
+	original, err := New(map[string]any{
+		"cmd":                  "/bin/sh",
+		"work_dir":             "/tmp/a",
+		"provider":             "p",
+		"model":                "p/m",
+		"thinking":             "low",
+		"mode":                 "dontAsk",
+		"offline":              true,
+		"confirm_timeout_secs": 60,
+	})
+	if err != nil {
+		t.Fatalf("New(original): %v", err)
+	}
+	opts := original.(*Agent).WorkspaceAgentOptions()
+	opts["work_dir"] = "/tmp/b" // engine fills this in
+
+	clone, err := New(opts)
+	if err != nil {
+		t.Fatalf("New(clone): %v", err)
+	}
+	c := clone.(*Agent)
+	if c.cmd != "/bin/sh" || c.provider != "p" || c.model != "p/m" ||
+		c.thinking != "low" || c.mode != "dontAsk" || !c.offline ||
+		c.confirmTimeout.Seconds() != 60 || c.workDir != "/tmp/b" {
+		t.Errorf("clone fields wrong: %+v", c)
+	}
+}
+
 func TestAgent_StartSession_InvalidSessionID(t *testing.T) {
 	dir := t.TempDir()
 	a, err := New(map[string]any{"cmd": "/bin/sh", "session_dir": dir})

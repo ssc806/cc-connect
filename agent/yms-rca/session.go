@@ -54,6 +54,17 @@ type session struct {
 	alive atomic.Bool
 	busy  atomic.Bool
 
+	// turnResultEmitted dedups EventResult between agent_end / turn_end /
+	// response/prompt ack-driven slash-command finalization. Reset by Send
+	// for each new turn.
+	turnResultEmitted atomic.Bool
+	// promptAcked is set when pi-rpc emits `response command=prompt` for the
+	// current prompt. For slash commands (no agent_end / turn_end), this is
+	// the cue that the very next `message_end role=custom customType=yms-command`
+	// is the slash command's terminal result — we emit EventText then Result.
+	// Reset by Send.
+	promptAcked atomic.Bool
+
 	sessionID    atomic.Value // string
 	contextUsage atomic.Pointer[core.ContextUsage]
 	seq          uint64
@@ -191,6 +202,11 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	if !s.busy.CompareAndSwap(false, true) {
 		return errors.New("yms-rca: previous turn still running")
 	}
+	// New turn — reset the result-emit dedup latch so agent_end / turn_end
+	// for this turn can fire EventResult exactly once. Also reset the
+	// promptAcked flag so the slash-command terminator path is armed fresh.
+	s.turnResultEmitted.Store(false)
+	s.promptAcked.Store(false)
 
 	// On any error after CAS we must release busy.
 	released := false
