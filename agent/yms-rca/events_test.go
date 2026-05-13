@@ -452,28 +452,30 @@ func TestHandleEvent_ExtensionUI_NotifyPlain(t *testing.T) {
 	}
 }
 
-// Regression for code-review HIGH: a slash-command turn produces:
+// Regression for code-review HIGH (round 2): a slash-command turn produces:
 //
-//  1. response/prompt success=true  → set promptAcked, clear busy
+//  1. response/prompt success=true  → set promptAcked, busy STAYS true
+//     (clearing busy here would race with a concurrent Send — see
+//     TestHandleEvent_RaceWithSendBetweenAckAndMessageEnd below).
 //  2. message_end role=custom customType=yms-command → emit EventText
-//     AND emit EventResult (latched). Engine sees text BEFORE result,
-//     matching protocol order.
+//     then emit EventResult (latched) and clear busy.
 //
 // pi-rpc does NOT emit turn_end / agent_end for slash commands, so
-// without this terminator the engine would never see EventResult and
-// busy would stay set, refusing the next Send.
+// without this terminator the engine would never see EventResult.
 func TestHandleEvent_SlashCommandTurnTerminates(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.busy.Store(true)
 	s.turnResultEmitted.Store(false)
 	s.promptAcked.Store(false)
+	s.currentPromptID.Store("cc-1")
 
 	// 1. response/prompt success=true arrives FIRST in real protocol.
 	s.handleEvent(map[string]any{
-		"type": "response", "command": "prompt", "success": true,
+		"type": "response", "command": "prompt", "id": "cc-1", "success": true,
 	})
-	if s.busy.Load() {
-		t.Error("busy not cleared on response/prompt")
+	// Busy MUST remain set — clearing here opens the race the reviewer flagged.
+	if !s.busy.Load() {
+		t.Error("busy cleared too early on response/prompt — would race with a concurrent Send")
 	}
 	if !s.promptAcked.Load() {
 		t.Error("promptAcked not set on response/prompt")
@@ -514,6 +516,89 @@ func TestHandleEvent_SlashCommandTurnTerminates(t *testing.T) {
 	}
 	if idxText >= 0 && idxResult >= 0 && idxText > idxResult {
 		t.Errorf("Result emitted before Text — engine would lose the slash-command output. Order: %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Error("busy not cleared at terminator message_end — next Send would be refused")
+	}
+}
+
+// Regression for code-review HIGH (round 2): if busy were cleared on
+// response/prompt success=true, a concurrent Send could pass the CAS
+// between the ack and the trailing message_end, resetting promptAcked
+// and causing the original turn's terminal EventResult to be dropped.
+//
+// With the fix, busy stays true until message_end fires, so the
+// concurrent Send is correctly refused.
+func TestHandleEvent_RaceWithSendBetweenAckAndMessageEnd(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.workDir = t.TempDir()
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.promptAcked.Store(false)
+	s.currentPromptID.Store("cc-1")
+
+	// 1. response/prompt success=true (current-turn id) arrives.
+	s.handleEvent(map[string]any{
+		"type": "response", "command": "prompt", "id": "cc-1", "success": true,
+	})
+
+	// 2. Racing Send call BEFORE the terminal message_end — must be refused
+	//    because the previous turn isn't fully done yet.
+	if err := s.Send("racy", nil, nil); err == nil {
+		t.Fatal("racing Send between ack and message_end was NOT refused — race window open, original turn's Result would be lost")
+	}
+
+	// 3. promptAcked must still be true — no Send reset it.
+	if !s.promptAcked.Load() {
+		t.Error("promptAcked was clobbered (by a leaked Send?)")
+	}
+
+	// 4. message_end fires the actual terminator.
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"display":    true,
+			"customType": "yms-command",
+			"content":    []any{map[string]any{"text": "ok"}},
+		},
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var gotResult bool
+	for _, e := range evts {
+		if e.Type == core.EventResult && e.Done {
+			gotResult = true
+		}
+	}
+	if !gotResult {
+		t.Error("EventResult missing after message_end — turn never finalized")
+	}
+	if s.busy.Load() {
+		t.Error("busy not cleared after message_end")
+	}
+}
+
+// Regression: a late `response command=prompt` from a prior turn must
+// not mutate the current turn's promptAcked / busy. Without the
+// stale-ack guard, a delayed ack with id="cc-1" could flip promptAcked
+// during Turn N+1 (currentPromptID="cc-2"), allowing the next yms-command
+// message_end to prematurely finalize.
+func TestHandleEvent_StalePromptAckIgnored(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.promptAcked.Store(false)
+	s.currentPromptID.Store("cc-2") // we're on turn 2
+
+	// A delayed ack for turn 1 arrives.
+	s.handleEvent(map[string]any{
+		"type": "response", "command": "prompt", "id": "cc-1", "success": true,
+	})
+	if s.promptAcked.Load() {
+		t.Error("stale prompt ack (id=cc-1) was honored on turn id=cc-2 — guard failed")
+	}
+	if !s.busy.Load() {
+		t.Error("stale ack incorrectly cleared busy")
 	}
 }
 

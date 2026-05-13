@@ -69,6 +69,10 @@ type session struct {
 	contextUsage atomic.Pointer[core.ContextUsage]
 	seq          uint64
 	statsSeq     uint64
+	// currentPromptID is the id ("cc-N") of the most recent prompt frame
+	// sent via Send. Used to detect stale response/prompt acks from a
+	// prior turn — a late ack must not influence the current turn's state.
+	currentPromptID atomic.Value // string
 
 	// confirm bridge
 	confirmMu      sync.Mutex
@@ -245,6 +249,10 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	}
 
 	id := fmt.Sprintf("cc-%d", atomic.AddUint64(&s.seq, 1))
+	// Record the current prompt id so handleResponse can reject stale
+	// `response command=prompt` frames carrying an older id (which would
+	// otherwise mutate this turn's promptAcked / busy state).
+	s.currentPromptID.Store(id)
 	frame := map[string]any{
 		"type":    "prompt",
 		"id":      id,

@@ -68,12 +68,21 @@ func (s *session) handleResponse(raw map[string]any) {
 		}
 	case "prompt":
 		// `response command=prompt` is pi-rpc's "prompt handler returned"
-		// signal. For LLM turns this fires AFTER agent_end / turn_end; for
-		// slash commands it fires BEFORE the trailing `message_end` carrying
-		// the result text. So we can't emit EventResult here without putting
-		// it ahead of the text. Instead: set promptAcked + clear busy now
-		// (pi-rpc is idle, next Send is safe), and let the message_end
-		// terminator emit the Result after the EventText.
+		// signal. For LLM turns it fires AFTER agent_end (which already
+		// finalized the turn). For slash commands it fires BEFORE the
+		// trailing `message_end` carrying the result text.
+		//
+		// Stale-ack guard: pi-rpc echoes back the id we sent in the prompt
+		// frame. A late ack carrying a prior turn's id must not touch the
+		// current turn's state — otherwise a Send issued between two
+		// turns would see a stale ack mutate promptAcked / busy.
+		respID := asString(raw, "id", "")
+		currentID, _ := s.currentPromptID.Load().(string)
+		if respID != "" && currentID != "" && respID != currentID {
+			slog.Debug("yms-rca: ignoring stale prompt ack",
+				"resp_id", respID, "current_id", currentID)
+			return
+		}
 		if !success {
 			msg := asString(raw, "errorMessage", "")
 			if msg == "" && data != nil {
@@ -87,9 +96,24 @@ func (s *session) handleResponse(raw map[string]any) {
 			s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg)})
 			// Errors finalize immediately — no trailing text to wait for.
 			s.maybeEmitTurnResult(nil)
+			s.busy.Store(false)
+			return
 		}
+		// success: pi-rpc has acked, but we cannot clear busy yet — the
+		// trailing `message_end` (slash command) or the already-finalized
+		// agent_end/turn_end (LLM turn) is the true terminator. Clearing
+		// busy here opens a race: a second Send between the ack and the
+		// message_end would CAS-pass and reset promptAcked, causing the
+		// original turn's terminal message_end to silently drop its
+		// EventResult.
+		//
+		// If agent_end already finalized (LLM turn): busy is already false
+		// and this Store is a no-op — but we don't write false here so we
+		// don't accidentally clobber a NEW turn started in the meantime.
+		// Setting promptAcked is also no-op for LLM turns (latch is set,
+		// message_end customType=yms-command will not fire as terminator
+		// because turnResultEmitted is already true).
 		s.promptAcked.Store(true)
-		s.busy.Store(false)
 	}
 }
 
@@ -237,14 +261,16 @@ func (s *session) handleMessageEnd(raw map[string]any) {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			}
 			// Slash-command terminator: pi-rpc emits `response command=prompt`
-			// BEFORE this final message_end (see handleResponse — we set
-			// promptAcked there but defer the Result emit). Now that the
-			// trailing text has been delivered to the engine, emit the
-			// EventResult so the turn closes cleanly. The latch ensures
-			// LLM turns (which emit Result via agent_end / turn_end before
-			// the response/prompt ack) don't double-emit.
+			// BEFORE this final message_end. handleResponse sets promptAcked
+			// (but does NOT clear busy or emit Result, to avoid a race with
+			// a concurrent Send). Now that the trailing text has been
+			// delivered to the engine, finalize the turn: emit Result via
+			// the latch and clear busy. The latch ensures LLM turns
+			// (finalized by agent_end before response/prompt arrives) don't
+			// double-emit; for those, this branch is a no-op.
 			if s.promptAcked.Load() {
 				s.maybeEmitTurnResult(nil)
+				s.busy.Store(false)
 			}
 		case "yms-rca.env-switch":
 			if display {
