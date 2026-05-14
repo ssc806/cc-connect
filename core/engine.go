@@ -801,7 +801,7 @@ func resolvePassthroughCmds(cmds []string) map[string]bool {
 		if id := matchPrefix(c, builtinCommands); id != "" {
 			m[id] = true
 		} else {
-			m[c] = true
+			m[normalizeCommandName(c)] = true
 		}
 	}
 	return m
@@ -817,7 +817,7 @@ func shouldPassthroughCommand(cmd, cmdID string, passthroughCmds map[string]bool
 	if cmdID != "" && passthroughCmds[cmdID] {
 		return true
 	}
-	return passthroughCmds[cmd]
+	return passthroughCmds[normalizeCommandName(cmd)]
 }
 
 // GetDisabledCommands returns the list of disabled command IDs for this project.
