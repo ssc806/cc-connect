@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -113,6 +114,58 @@ func TestWindowsTaskMatchesActionRequiresExactAction(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("reuse check script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestBuildWindowsTaskScript_DropsInvalidEnvName(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "x", WorkDir: "y", LogFile: "l", LogMaxSize: 1, EnvPATH: "p",
+		EnvExtra: map[string]string{"FOO BAR": "v", "OK": "ok"},
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, "FOO BAR") {
+		t.Errorf("invalid env name leaked: %s", script)
+	}
+	if !strings.Contains(script, "$env:OK = 'ok'") {
+		t.Errorf("valid env missing: %s", script)
+	}
+}
+
+func TestBuildWindowsTaskScript_DropsEmptyValue(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "x", WorkDir: "y", LogFile: "l", LogMaxSize: 1, EnvPATH: "p",
+		EnvExtra: map[string]string{"EMPTY": "", "OK": "ok"},
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, "$env:EMPTY") {
+		t.Errorf("empty value should be skipped: %s", script)
+	}
+}
+
+// TestSchtasksUninstall_RemovesScript guards against captured-secret
+// residue in the PowerShell task script. Uninstall must delete the
+// script so $env:IUAPYYS_MCP_TOKEN lines don't linger.
+func TestSchtasksUninstall_RemovesScript(t *testing.T) {
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+	runPowerShell = func(script string) (string, error) { return "", nil }
+
+	if err := os.MkdirAll(DefaultDataDir(), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	scriptPath := windowsTaskScriptPath()
+	if err := os.WriteFile(scriptPath, []byte("$env:SECRET = 'oops'\r\n"), 0o600); err != nil {
+		t.Fatalf("seed script: %v", err)
+	}
+
+	mgr := &schtasksManager{}
+	if err := mgr.Uninstall(); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
+		t.Fatalf("task script must be removed after Uninstall; stat err=%v", err)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 const (
@@ -48,7 +50,11 @@ func (m *schtasksManager) Install(cfg Config) error {
 	}
 
 	scriptPath := windowsTaskScriptPath()
-	if err := os.WriteFile(scriptPath, []byte(buildWindowsTaskScript(cfg)), 0644); err != nil {
+	// 0644 has weak semantics on Windows; the file ACL is what matters.
+	// We still write 0600 so the file's POSIX bits do not advertise read
+	// access, and rely on the user's own profile ACLs for primary defense
+	// (the script lives under %USERPROFILE%\.cc-connect by default).
+	if err := os.WriteFile(scriptPath, []byte(buildWindowsTaskScript(cfg)), 0600); err != nil {
 		return fmt.Errorf("write task script: %w", err)
 	}
 
@@ -182,7 +188,16 @@ func buildWindowsTaskScript(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			writePowerShellEnv(&sb, key, cfg.EnvExtra[key])
+			if !ymsprofile.IsValidEnvName(key) {
+				slog.Warn("daemon: windows: dropping invalid env name from EnvExtra",
+					"key", key)
+				continue
+			}
+			value := cfg.EnvExtra[key]
+			if value == "" {
+				continue
+			}
+			writePowerShellEnv(&sb, key, value)
 		}
 	}
 	fmt.Fprintf(&sb, "Set-Location -LiteralPath %s\r\n", powerShellLiteral(cfg.WorkDir))
