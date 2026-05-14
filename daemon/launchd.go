@@ -52,9 +52,14 @@ func (m *launchdManager) Install(cfg Config) error {
 	plist := buildPlist(cfg)
 	// 0600: plist may contain captured secret values (yms-rca mcp.token_env
 	// vars). user-only LaunchAgents path; root can still read but that is
-	// the user's own machine boundary.
+	// the user's own machine boundary. WriteFile only applies perm on
+	// create, so Chmod afterwards is required to fix reinstalls of files
+	// that pre-existed at 0644 from earlier cc-connect versions.
 	if err := os.WriteFile(plistPath, []byte(plist), 0600); err != nil {
 		return fmt.Errorf("write plist: %w", err)
+	}
+	if err := os.Chmod(plistPath, 0600); err != nil {
+		return fmt.Errorf("chmod plist: %w", err)
 	}
 
 	domain := preferredLaunchdDomain()

@@ -142,6 +142,50 @@ func TestBuildWindowsTaskScript_DropsEmptyValue(t *testing.T) {
 	}
 }
 
+// TestSchtasksInstall_TightensExistingScriptFrom0644 covers the upgrade
+// path: os.WriteFile would truncate-in-place and keep the old POSIX
+// mode of a script left by an earlier cc-connect version. While
+// Windows real access is governed by ACLs, the POSIX bits are still
+// expected to reflect intent.
+func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+	runPowerShell = func(script string) (string, error) { return "", nil }
+
+	if err := os.MkdirAll(DefaultDataDir(), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	scriptPath := windowsTaskScriptPath()
+	if err := os.WriteFile(scriptPath, []byte("$env:OLD = 'leftover'\r\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy script: %v", err)
+	}
+	if info, _ := os.Stat(scriptPath); info.Mode().Perm() != 0o644 {
+		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	mgr := &schtasksManager{}
+	cfg := Config{
+		BinaryPath: "C:\\cc.exe",
+		WorkDir:    t.TempDir(),
+		LogFile:    "C:\\cc.log",
+		LogMaxSize: 1024,
+		EnvPATH:    "C:\\bin",
+		EnvExtra:   map[string]string{"IUAPYYS_MCP_TOKEN": "captured"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("script mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
 // TestSchtasksUninstall_RemovesScript guards against captured-secret
 // residue in the PowerShell task script. Uninstall must delete the
 // script so $env:IUAPYYS_MCP_TOKEN lines don't linger.

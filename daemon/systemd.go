@@ -65,8 +65,14 @@ func (m *systemdManager) Install(cfg Config) error {
 	// mcp.token_env vars). For system-level units (/etc/systemd/system/)
 	// the file is owned by root and remains readable by root only; for
 	// user-level units under ~/.config/systemd/user it remains owner-only.
+	// WriteFile only applies perm on create, so Chmod afterwards is
+	// required to harden reinstalls of pre-existing 0644 units from
+	// earlier cc-connect versions.
 	if err := os.WriteFile(unitPath, []byte(unit), 0600); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
+	}
+	if err := os.Chmod(unitPath, 0600); err != nil {
+		return fmt.Errorf("chmod unit file: %w", err)
 	}
 
 	for _, cmdArgs := range [][]string{

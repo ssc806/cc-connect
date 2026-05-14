@@ -375,6 +375,52 @@ func TestInstallLaunchd_WritesPlistAt0600(t *testing.T) {
 	}
 }
 
+// TestInstallLaunchd_TightensExistingPlistFrom0644 covers the upgrade
+// path: a user from an earlier cc-connect version may already have a
+// 0644 plist on disk; os.WriteFile would truncate-in-place and *keep*
+// the old permissions, leaving captured token values world-readable.
+// Install must explicitly tighten the existing file to 0600.
+func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Seed a legacy 0644 plist as a prior cc-connect version would have left it.
+	if err := os.WriteFile(plistPath, []byte("<plist>old</plist>\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy plist: %v", err)
+	}
+	if info, _ := os.Stat(plistPath); info.Mode().Perm() != 0o644 {
+		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	mgr := &launchdManager{}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    filepath.Join(t.TempDir(), "cc.log"),
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"IUAPYYS_MCP_TOKEN": "captured"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(plistPath)
+	if err != nil {
+		t.Fatalf("stat after Install: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
 // TestLaunchdUninstall_RemovesPlist guards against captured-secret
 // residue: a `cc-connect daemon install` may have baked an
 // IUAPYYS_MCP_TOKEN value into the plist; uninstall must delete the

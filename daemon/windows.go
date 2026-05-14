@@ -54,8 +54,13 @@ func (m *schtasksManager) Install(cfg Config) error {
 	// We still write 0600 so the file's POSIX bits do not advertise read
 	// access, and rely on the user's own profile ACLs for primary defense
 	// (the script lives under %USERPROFILE%\.cc-connect by default).
+	// WriteFile only applies perm on create, so Chmod the existing file
+	// after writing to harden reinstalls of pre-existing 0644 scripts.
 	if err := os.WriteFile(scriptPath, []byte(buildWindowsTaskScript(cfg)), 0600); err != nil {
 		return fmt.Errorf("write task script: %w", err)
+	}
+	if err := os.Chmod(scriptPath, 0600); err != nil {
+		return fmt.Errorf("chmod task script: %w", err)
 	}
 
 	if err := stopWindowsTask(); err != nil {

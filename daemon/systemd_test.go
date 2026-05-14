@@ -78,6 +78,49 @@ func TestBuildUnit_DropsEmptyValue(t *testing.T) {
 //
 // Install() itself shells out to systemctl; we exercise just the
 // filesystem half by re-running the WriteFile under the same flag.
+// TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
+// path: os.WriteFile would truncate-in-place and KEEP the old 0644
+// permissions of a unit file left over from earlier cc-connect
+// versions, leaving captured token values world-readable.
+func TestSystemdInstall_TightensExistingUnitFrom0644(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	origSys := runSystemctl
+	t.Cleanup(func() { runSystemctl = origSys })
+	runSystemctl = func(args ...string) (string, error) { return "", nil }
+
+	mgr := &systemdManager{system: false}
+	unitPath := mgr.unitPath()
+	if err := os.MkdirAll(unitPath[:strings.LastIndex(unitPath, "/")], 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, []byte("[Service]\nExecStart=/bin/true\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy unit: %v", err)
+	}
+	if info, _ := os.Stat(unitPath); info.Mode().Perm() != 0o644 {
+		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    "/tmp/cc.log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"IUAPYYS_MCP_TOKEN": "captured"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(unitPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("unit mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
 // TestSystemdUninstall_RemovesUnit guards against captured-secret
 // residue: any IUAPYYS_MCP_TOKEN value rendered into the unit file
 // during install must be deleted by uninstall.
