@@ -1919,6 +1919,24 @@ func TestResolveDisabledCmds_Specific(t *testing.T) {
 	}
 }
 
+func TestEngine_PassthroughCommandsWildcard(t *testing.T) {
+	e := newTestEngine()
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	for _, raw := range []string{"/help", "/model", "/status", "/compact"} {
+		p.clearSent()
+		if handled := e.handleCommand(p, msg, raw); handled {
+			t.Fatalf("handleCommand(%q) handled command, want passthrough", raw)
+		}
+		if sent := p.getSent(); len(sent) != 0 {
+			t.Fatalf("handleCommand(%q) sent %v, want no cc-connect reply", raw, sent)
+		}
+	}
+}
+
 func TestResolveDisabledCmds_Empty(t *testing.T) {
 	m1 := resolveDisabledCmds(nil)
 	if len(m1) != 0 {
@@ -10871,9 +10889,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                                { return false }
+func (c *stubStreamingCard) Failed() bool                               { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

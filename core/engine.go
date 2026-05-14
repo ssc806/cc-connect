@@ -209,10 +209,11 @@ type Engine struct {
 	bannedWords []string
 	bannedMu    sync.RWMutex
 
-	disabledCmds map[string]bool
-	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
-	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
+	disabledCmds    map[string]bool
+	passthroughCmds map[string]bool
+	adminFrom       string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	userRoles       *UserRoleManager // nil = legacy mode (no per-user policies)
+	userRolesMu     sync.RWMutex     // protects userRoles, disabledCmds, passthroughCmds, and adminFrom
 
 	rateLimiter       *RateLimiter
 	outgoingRL        *OutgoingRateLimiter
@@ -419,6 +420,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
+		disabledCmds:          make(map[string]bool),
+		passthroughCmds:       make(map[string]bool),
 		interactiveStates:     make(map[string]*interactiveState),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
@@ -784,6 +787,39 @@ func resolveDisabledCmds(cmds []string) map[string]bool {
 	return m
 }
 
+func resolvePassthroughCmds(cmds []string) map[string]bool {
+	m := make(map[string]bool, len(cmds))
+	for _, c := range cmds {
+		c = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(c, "/")))
+		if c == "" {
+			continue
+		}
+		if c == "*" {
+			m["*"] = true
+			continue
+		}
+		if id := matchPrefix(c, builtinCommands); id != "" {
+			m[id] = true
+		} else {
+			m[c] = true
+		}
+	}
+	return m
+}
+
+func shouldPassthroughCommand(cmd, cmdID string, passthroughCmds map[string]bool) bool {
+	if len(passthroughCmds) == 0 {
+		return false
+	}
+	if passthroughCmds["*"] {
+		return true
+	}
+	if cmdID != "" && passthroughCmds[cmdID] {
+		return true
+	}
+	return passthroughCmds[cmd]
+}
+
 // GetDisabledCommands returns the list of disabled command IDs for this project.
 func (e *Engine) GetDisabledCommands() []string {
 	e.userRolesMu.RLock()
@@ -801,6 +837,13 @@ func (e *Engine) SetDisabledCommands(cmds []string) {
 	e.userRolesMu.Lock()
 	defer e.userRolesMu.Unlock()
 	e.disabledCmds = resolveDisabledCmds(cmds)
+}
+
+// SetPassthroughCommands sets slash commands that should bypass cc-connect command handling.
+func (e *Engine) SetPassthroughCommands(cmds []string) {
+	e.userRolesMu.Lock()
+	defer e.userRolesMu.Unlock()
+	e.passthroughCmds = resolvePassthroughCmds(cmds)
 }
 
 // SetUserRoles configures per-user role-based policies. Pass nil to disable.
@@ -3087,7 +3130,6 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 	return sb.String()
 }
 
-
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
 // for the reader goroutine to exit. The reader is structured so its iterations
 // are short (blocking adapter calls like RespondPermission are offloaded), so
@@ -3430,8 +3472,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry // track tool calls for card content
-	var cardThinkingText string       // latest thinking text
+	var cardToolCalls []cardToolEntry  // track tool calls for card content
+	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
@@ -4732,8 +4774,15 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	// Resolve effective disabled commands: role-based if available, else project-level
 	e.userRolesMu.RLock()
 	disabledCmds := e.disabledCmds
+	passthrough := shouldPassthroughCommand(cmd, cmdID, e.passthroughCmds)
 	urm := e.userRoles
 	e.userRolesMu.RUnlock()
+	if passthrough {
+		slog.Info("audit: command_passthrough",
+			"user_id", msg.UserID, "platform", msg.Platform,
+			"project", e.name, "command", cmd)
+		return false
+	}
 	if urm != nil {
 		if role := urm.ResolveRole(msg.UserID); role != nil {
 			disabledCmds = role.DisabledCmds
