@@ -883,6 +883,28 @@ var privilegedCommands = map[string]bool{
 	"diff":    true,
 }
 
+func isPrivilegedCommandInvocation(cmdID string, args []string) bool {
+	if privilegedCommands[cmdID] {
+		return true
+	}
+	if len(args) == 0 {
+		return false
+	}
+	sub := strings.ToLower(args[0])
+	switch cmdID {
+	case "commands":
+		return matchSubCommand(sub, []string{
+			"list", "add", "addexec", "del", "delete", "rm", "remove",
+		}) == "addexec"
+	case "cron":
+		return matchSubCommand(sub, []string{
+			"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
+		}) == "addexec"
+	default:
+		return false
+	}
+}
+
 // isAdmin checks whether the given user ID is authorized for privileged commands.
 // Unlike AllowList, empty adminFrom means deny-all (fail-closed).
 func (e *Engine) isAdmin(userID string) bool {
@@ -4774,20 +4796,14 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	// Resolve effective disabled commands: role-based if available, else project-level
 	e.userRolesMu.RLock()
 	disabledCmds := e.disabledCmds
-	passthrough := shouldPassthroughCommand(cmd, cmdID, e.passthroughCmds)
 	urm := e.userRoles
-	e.userRolesMu.RUnlock()
-	if passthrough {
-		slog.Info("audit: command_passthrough",
-			"user_id", msg.UserID, "platform", msg.Platform,
-			"project", e.name, "command", cmd)
-		return false
-	}
 	if urm != nil {
 		if role := urm.ResolveRole(msg.UserID); role != nil {
 			disabledCmds = role.DisabledCmds
 		}
 	}
+	passthrough := shouldPassthroughCommand(cmd, cmdID, e.passthroughCmds)
+	e.userRolesMu.RUnlock()
 
 	if cmdID != "" && disabledCmds[cmdID] {
 		slog.Info("audit: command_blocked",
@@ -4797,12 +4813,19 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	}
 
-	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+	if cmdID != "" && isPrivilegedCommandInvocation(cmdID, args) && !e.isAdmin(msg.UserID) {
 		slog.Info("audit: command_blocked",
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
 		return true
+	}
+
+	if passthrough && cmdID != "" {
+		slog.Info("audit: command_passthrough",
+			"user_id", msg.UserID, "platform", msg.Platform,
+			"project", e.name, "command", cmd)
+		return false
 	}
 
 	if cmdID != "" {
@@ -4910,6 +4933,19 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+custom.Name))
 				return true
 			}
+			if custom.Exec != "" && !e.isAdmin(msg.UserID) {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", custom.Name, "reason", "unauthorized")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+custom.Name))
+				return true
+			}
+			if passthrough {
+				slog.Info("audit: command_passthrough",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", cmd)
+				return false
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", custom.Name, "type", "custom")
@@ -4924,11 +4960,23 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+skill.Name))
 				return true
 			}
+			if passthrough {
+				slog.Info("audit: command_passthrough",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", cmd)
+				return false
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
 			e.executeSkill(p, msg, skill, args)
 			return true
+		}
+		if passthrough {
+			slog.Info("audit: command_passthrough",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", cmd)
+			return false
 		}
 		// Not a cc-connect command — notify user, then fall through to agent
 		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))

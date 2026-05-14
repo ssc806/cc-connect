@@ -1937,6 +1937,95 @@ func TestEngine_PassthroughCommandsWildcard(t *testing.T) {
 	}
 }
 
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassDisabledBuiltin(t *testing.T) {
+	e := newTestEngine()
+	e.SetDisabledCommands([]string{"restart"})
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/restart"); !handled {
+		t.Fatal("disabled builtin should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || (!strings.Contains(sent[0], "disabled") && !strings.Contains(sent[0], "禁用")) {
+		t.Fatalf("expected disabled reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassAdminBuiltin(t *testing.T) {
+	e := newTestEngine()
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/shell echo hi"); !handled {
+		t.Fatal("privileged builtin should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassAdminSubcommand(t *testing.T) {
+	e := newTestEngine()
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/commands addexec deploy echo hi"); !handled {
+		t.Fatal("privileged subcommand should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassAdminCustomExecCommand(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy", "deploy command", "", "echo deploying", "", "test")
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/deploy"); !handled {
+		t.Fatal("custom exec command should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassRoleDisabledCustomCommand(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy", "deploy command", "deploy it", "", "", "test")
+	e.SetPassthroughCommands([]string{"*"})
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"deploy"}},
+	})
+	e.SetUserRoles(urm)
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/deploy"); !handled {
+		t.Fatal("role-disabled custom command should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || (!strings.Contains(sent[0], "disabled") && !strings.Contains(sent[0], "禁用")) {
+		t.Fatalf("expected disabled reply, got %v", sent)
+	}
+}
+
 func TestResolveDisabledCmds_Empty(t *testing.T) {
 	m1 := resolveDisabledCmds(nil)
 	if len(m1) != 0 {
