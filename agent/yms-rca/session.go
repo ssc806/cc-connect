@@ -53,12 +53,27 @@ type session struct {
 
 	// internalActive is set while a hidden control turn (e.g. auto-
 	// restore /connect <profile>) is in flight. emit() consults it and
-	// routes events to handleInternalEvent instead of s.events.
+	// routes events to handleInternalEvent instead of s.events. It stays
+	// true through the full subprocess lifecycle of the hidden prompt —
+	// even after the hidden turn signals failure — so trailing text/
+	// EventResult events from the failing /connect don't leak as user-
+	// visible output before the subprocess is fully drained.
 	internalActive atomic.Bool
-	// internalMu guards internalDone — the result channel for the
-	// currently-running hidden turn (nil otherwise).
-	internalMu   sync.Mutex
-	internalDone chan error
+	// internalMu guards internalDone and internalResult.
+	//
+	//  internalDone   — signaled by the first failure event (EventError,
+	//                   EventPermissionRequest) or by EventResult on a
+	//                   clean success. Tells runInternalPrompt to return
+	//                   the result to the caller.
+	//
+	//  internalResult — signaled only by EventResult. Marks the subprocess
+	//                   as fully done with the hidden prompt; runInternal
+	//                   Prompt blocks on this AFTER receiving the done
+	//                   signal so trailing events from a failed /connect
+	//                   are consumed under internalActive=true.
+	internalMu     sync.Mutex
+	internalDone   chan error
+	internalResult chan struct{}
 	// restoreAttempted ensures profile auto-restore runs at most once
 	// per session lifetime, regardless of how many Send calls arrive.
 	restoreAttempted atomic.Bool

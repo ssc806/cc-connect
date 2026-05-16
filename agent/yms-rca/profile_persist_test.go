@@ -87,6 +87,45 @@ func TestNewSessionExtractsProjectAndSessionKeyFromEnv(t *testing.T) {
 	}
 }
 
+// TestObserveStatusProfileDoesNotClearStore verifies the PR #10 review-
+// round-2 fix for Finding 2b: a setStatus echo of "env: local" from
+// /status (or any informational subprocess status update) must NOT
+// erase the persisted non-local profile. Only the authoritative env-
+// switch path (yms-rca.env-switch message_end) — i.e. the user really
+// ran /disconnect — may clear the store.
+func TestObserveStatusProfileDoesNotClearStore(t *testing.T) {
+	s, store := newTestSessionWithStore(t, "p", "k")
+	store.Set("p", "k", "pre")
+
+	// Simulate /status echoing back "env: local" because the subprocess
+	// is freshly spawned and the auto-restore hasn't run yet.
+	s.observeStatusProfile("local")
+
+	if got := store.Get("p", "k"); got != "pre" {
+		t.Errorf("setStatus echo must not clear store; want pre, got %q", got)
+	}
+	if got := s.currentProfileName(); got != "local" {
+		t.Errorf("in-memory profile should reflect echo, got %q", got)
+	}
+}
+
+// TestObserveStatusProfileUpdatesInMemoryButDoesNotPersist verifies the
+// inverse — observing a non-local status echo updates the in-memory
+// snapshot but still does not touch the store (the env-switch path is
+// authoritative for persistence).
+func TestObserveStatusProfileUpdatesInMemoryButDoesNotPersist(t *testing.T) {
+	s, store := newTestSessionWithStore(t, "p", "k")
+
+	s.observeStatusProfile("yms-dev")
+
+	if got := s.currentProfileName(); got != "yms-dev" {
+		t.Errorf("in-memory profile = %q, want yms-dev", got)
+	}
+	if got := store.Get("p", "k"); got != "" {
+		t.Errorf("setStatus must not persist; store = %q, want empty", got)
+	}
+}
+
 func TestParseProjectAndSessionKeyMissingFields(t *testing.T) {
 	project, sessionKey := parseProjectAndSessionKey([]string{"PATH=/usr/bin"})
 	if project != "" || sessionKey != "" {

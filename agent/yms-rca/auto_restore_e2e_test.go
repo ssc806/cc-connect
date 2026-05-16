@@ -142,8 +142,12 @@ func TestE2E_AutoRestoreScenarioB_FailurePreservesStore(t *testing.T) {
 		for time.Now().Before(deadline) {
 			for _, f := range enc.framesCopy() {
 				if f["type"] == "prompt" && strings.Contains(asString(f, "id", ""), "-restore") {
-					// Simulate yms-rca-side error.
+					// Simulate yms-rca-side error followed by the
+					// subprocess's terminal EventResult — the new contract
+					// in runInternalPrompt drains until EventResult so
+					// trailing events from the failed /connect can't leak.
 					s.emit(core.Event{Type: core.EventError, Error: errTokenMissing()})
+					s.emit(core.Event{Type: core.EventResult, Done: true})
 					return
 				}
 			}

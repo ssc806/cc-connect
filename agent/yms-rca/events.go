@@ -520,7 +520,14 @@ func (s *session) handleExtensionUIRequest(raw map[string]any) {
 	id, _ := raw["id"].(string)
 	method, _ := raw["method"].(string)
 	if method == "setStatus" {
-		s.updateCurrentProfile(profileFromStatusEvent(raw))
+		// setStatus is an informational echo of the subprocess's current
+		// status — it can fire from /status output, periodic refreshes,
+		// or any internal state observation. It is NOT authoritative for
+		// connection state, so we update the in-memory profile (for
+		// footer display) but do NOT touch the persisted store. The
+		// authoritative env-switch path (yms-rca.env-switch message_end
+		// in handleMessageEnd) is what mutates the store.
+		s.observeStatusProfile(profileFromStatusEvent(raw))
 		return
 	}
 	if id == "" {
@@ -674,6 +681,29 @@ func (s *session) emitText(content string) {
 	s.emit(core.Event{Type: core.EventText, Content: content})
 }
 
+// observeStatusProfile updates the in-memory profile snapshot from a
+// non-authoritative source (subprocess setStatus echo). It refreshes the
+// footer and agent-level snapshot but does NOT persist — a /status echo
+// of "env: local" after a daemon restart (when the subprocess hasn't yet
+// been auto-restored) must not erase the stored non-local profile that
+// the upcoming business prompt would have restored.
+func (s *session) observeStatusProfile(profile string) {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return
+	}
+	s.currentProfile.Store(profile)
+	if s.profileUpdater != nil {
+		s.profileUpdater(profile)
+	}
+}
+
+// updateCurrentProfile is the authoritative path: it is called from the
+// yms-rca.env-switch message_end handler, which only fires when /connect
+// or /disconnect actually changed the subprocess's MCP attachment. It
+// persists the change so future daemon restarts can auto-restore; a
+// transition to "local" clears the persisted entry because the user has
+// explicitly disconnected.
 func (s *session) updateCurrentProfile(profile string) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {

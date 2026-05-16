@@ -23,15 +23,23 @@ const defaultAutoRestoreTimeout = 30 * time.Second
 //
 // Lifecycle:
 //
-//  1. Set internalActive=true and install a result channel.
+//  1. Set internalActive=true and install done + result channels.
 //  2. Reset all turn-level latches so the hidden turn starts clean.
 //  3. Write the hidden prompt frame with a `-restore` suffixed id so a
 //     stale response/prompt ack from the prior turn can't influence state.
-//  4. Wait for: EventResult (success), EventError (failure), permission
-//     request (auto-deny + failure), ctx cancel, or timeout.
-//  5. Clear internalActive and the channel.
-//  6. Reset turn-level latches again so the upcoming user turn is fresh.
-//  7. On success, verify currentProfileName matches the requested profile.
+//  4. Wait for the "done" signal: EventResult (success), EventError
+//     (failure), permission request (auto-deny + failure), ctx cancel,
+//     or wait-timeout.
+//  5. Then DRAIN: wait for EventResult, which only fires when the
+//     subprocess has fully terminated the hidden prompt. This guarantees
+//     trailing text / EventResult / env-switch events from a failed
+//     /connect are routed to handleInternalEvent (and dropped) under
+//     internalActive=true — they don't leak as user-visible output.
+//     If drain exceeds drainTimeout, mark the session dead so the engine
+//     recycles to a fresh subprocess for the next user message.
+//  6. Clear internalActive and the channels.
+//  7. Reset turn-level latches so the upcoming user turn is fresh.
+//  8. On success, verify currentProfileName matches the requested profile.
 //
 // The caller must hold session.busy=true across this call AND the user
 // prompt that follows — runInternalPrompt does not toggle busy.
@@ -41,8 +49,10 @@ func (s *session) runInternalPrompt(ctx context.Context, prompt, expectProfile s
 	}
 
 	done := make(chan error, 1)
+	result := make(chan struct{})
 	s.internalMu.Lock()
 	s.internalDone = done
+	s.internalResult = result
 	s.internalMu.Unlock()
 	s.internalActive.Store(true)
 
@@ -64,19 +74,45 @@ func (s *session) runInternalPrompt(ctx context.Context, prompt, expectProfile s
 		return fmt.Errorf("yms-rca: write hidden prompt: %w", err)
 	}
 
-	var result error
+	var resultErr error
 	select {
-	case result = <-done:
+	case resultErr = <-done:
 	case <-ctx.Done():
-		result = ctx.Err()
+		resultErr = ctx.Err()
 	case <-time.After(timeout):
-		result = fmt.Errorf("yms-rca: auto-restore timeout after %s", timeout)
+		resultErr = fmt.Errorf("yms-rca: auto-restore timeout after %s", timeout)
+	}
+
+	// Drain: wait for the subprocess's EventResult so trailing events from
+	// a failed /connect (denial text, message_end customType=yms-command,
+	// response command=prompt → maybeFinalizeSlashCommandTurn → EventResult,
+	// possibly yms-rca.env-switch "local") are all suppressed via handle
+	// InternalEvent. Without this, internalActive would flip false before
+	// those events arrive and they would leak to s.events. The success path
+	// is a no-op here — EventResult already signaled both done and result.
+	//
+	// ctx cancellation and drain timeout both fall through to "mark
+	// session dead + cancel subprocess context" so any further events
+	// from the hidden /connect get terminated at the source rather than
+	// outliving the session.
+	select {
+	case <-result:
+	case <-ctx.Done():
+		slog.Warn("yms-rca: hidden turn drain aborted (ctx cancelled); marking session dead",
+			"hidden_id", id, "ctx_err", ctx.Err())
+		s.alive.Store(false)
+		s.cancel()
+	case <-time.After(timeout):
+		slog.Warn("yms-rca: hidden turn drain timeout; marking session dead to force recycle",
+			"hidden_id", id, "drain_timeout", timeout)
+		s.alive.Store(false)
+		s.cancel()
 	}
 
 	s.endInternalTurn()
 
-	if result != nil {
-		return result
+	if resultErr != nil {
+		return resultErr
 	}
 
 	// Verify the hidden /connect actually switched the profile. yms-rca
@@ -89,12 +125,13 @@ func (s *session) runInternalPrompt(ctx context.Context, prompt, expectProfile s
 	return nil
 }
 
-// endInternalTurn flips the active flag off, clears the result channel,
-// and resets latches so the upcoming user turn starts fresh.
+// endInternalTurn flips the active flag off, clears the channels, and
+// resets latches so the upcoming user turn starts fresh.
 func (s *session) endInternalTurn() {
 	s.internalActive.Store(false)
 	s.internalMu.Lock()
 	s.internalDone = nil
+	s.internalResult = nil
 	s.internalMu.Unlock()
 	// Caller will write the user prompt next; reset latches now so the
 	// stale state from the hidden turn doesn't leak into it. The Send
@@ -119,24 +156,51 @@ func (s *session) signalInternalDone(err error) {
 	}
 }
 
+// signalInternalResult marks the subprocess as having fully terminated
+// the hidden prompt. Safe to call multiple times; only the first close
+// has effect.
+func (s *session) signalInternalResult() {
+	s.internalMu.Lock()
+	ch := s.internalResult
+	// Nil out so a re-entrant emit can't double-close.
+	if ch != nil {
+		s.internalResult = nil
+	}
+	s.internalMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
 // handleInternalEvent decides what to do with an event observed during
 // an active hidden turn. EventText / EventThinking / EventToolUse /
 // EventToolResult are dropped; EventError / EventResult / EventPermission
-// Request all terminate the hidden turn.
+// Request terminate the wait for the hidden turn's caller — but
+// internalActive STAYS TRUE until EventResult arrives (the subprocess's
+// real terminal for the hidden prompt). This guarantees trailing events
+// from a failing /connect don't leak as user-visible output.
 //
 // EventPermissionRequest is special: auto-restore cannot prompt the user,
 // so we must (a) write extension_ui_response confirmed:false back to the
-// yms-rca subprocess so it unblocks, and (b) end the turn with an error.
+// yms-rca subprocess so it unblocks, and (b) signal the caller with an
+// error. The subprocess's subsequent text/end events stay suppressed
+// until the drain in runInternalPrompt sees EventResult.
 func (s *session) handleInternalEvent(evt core.Event) {
 	switch evt.Type {
 	case core.EventResult:
+		// EventResult is the subprocess's terminal event for the hidden
+		// prompt. Signal both: success path uses done, failure path is
+		// already done but still needs result to complete drain.
 		s.signalInternalDone(nil)
+		s.signalInternalResult()
 	case core.EventError:
 		err := evt.Error
 		if err == nil {
 			err = errors.New("yms-rca: auto-restore failed (no detail)")
 		}
 		s.signalInternalDone(err)
+		// Don't signal result — subprocess may still emit further events
+		// up to and including its own EventResult. Drain waits for that.
 	case core.EventPermissionRequest:
 		if evt.RequestID != "" {
 			// nil emit — we don't want any user-visible reason text leaking
@@ -144,6 +208,8 @@ func (s *session) handleInternalEvent(evt core.Event) {
 			s.resolvePendingConfirm(evt.RequestID, false, "", nil)
 		}
 		s.signalInternalDone(errors.New("yms-rca: auto-restore cannot prompt user for permission"))
+		// Don't signal result; subprocess will continue processing the
+		// denial and eventually emit EventResult. Drain waits for that.
 	default:
 		// EventText, EventThinking, EventToolUse, EventToolResult — dropped.
 		slog.Debug("yms-rca: suppressing event during hidden turn", "type", evt.Type)
@@ -173,13 +239,16 @@ func (s *session) resetTurnLatches(prompt string) {
 //
 // Bypasses (no restore attempted, no error returned):
 //
-//   - already attempted once this session (restoreAttempted latch).
 //   - user prompt is itself a slash command — /connect, /disconnect,
 //     /status, /help etc.: the user's explicit intent wins; we don't
-//     want to insert an MCP attach/detach cycle in front of it.
+//     want to insert an MCP attach/detach cycle in front of it. The
+//     restoreAttempted latch is NOT consumed here, so a later business
+//     prompt in the same session still gets its restore chance.
 //   - no project / session_key (programmatic test path; no relay).
 //   - no profileStore wired.
 //   - store has no entry, or entry is "local".
+//   - already attempted (or pre-flight-failed) once this session
+//     (restoreAttempted latch).
 //
 // If the stored profile name fails character-set validation, we clear
 // the entry and skip — depth-in-defense against hand-edited store files.
@@ -195,11 +264,12 @@ func (s *session) resetTurnLatches(prompt string) {
 // stored profile. On failure returns a wrapped error; the caller is
 // expected to surface it to the user and NOT send the original prompt.
 func (s *session) maybeRestoreProfileBeforePrompt(ctx context.Context, prompt string) error {
-	if !s.restoreAttempted.CompareAndSwap(false, true) {
-		return nil
-	}
-	// User's slash command always wins. ParseConnectTarget is a stricter
-	// subset of isSlashCommandPrompt and is checked implicitly here.
+	// User's slash command always wins, and must NOT consume the one-
+	// shot restoreAttempted latch — otherwise a /status as the first
+	// message after a daemon restart would silently burn the only
+	// auto-restore opportunity for the session. ParseConnectTarget is
+	// a stricter subset of isSlashCommandPrompt and is checked
+	// implicitly here.
 	if isSlashCommandPrompt(prompt) {
 		return nil
 	}
@@ -214,6 +284,13 @@ func (s *session) maybeRestoreProfileBeforePrompt(ctx context.Context, prompt st
 		slog.Warn("yms-rca: stored profile name invalid, clearing entry",
 			"project", s.project, "profile", profile)
 		s.profileStore.Clear(s.project, s.sessionKey)
+		return nil
+	}
+	// Latch BEFORE attempting (including pre-flight) so a failed restore
+	// isn't retried on every subsequent prompt — once the user has seen
+	// the error, they should /connect manually rather than have us spin
+	// the same failure.
+	if !s.restoreAttempted.CompareAndSwap(false, true) {
 		return nil
 	}
 	// Pre-flight env-var check so a stale token in the store surfaces
