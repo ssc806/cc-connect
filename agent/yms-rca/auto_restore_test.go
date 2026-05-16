@@ -221,13 +221,32 @@ func TestMaybeRestoreSkipsWhenSlashCommand(t *testing.T) {
 	}
 }
 
-func TestMaybeRestoreSkipsWhenAlreadyConnected(t *testing.T) {
+// TestMaybeRestoreProceedsEvenIfInheritedProfileIsNonLocal verifies that
+// auto-restore does NOT short-circuit on the session's `currentProfile`
+// field being non-local. That field is seeded from the agent-level
+// last-known profile (for footer display) — it does NOT reflect the
+// freshly-spawned subprocess's MCP connection state, which always starts
+// in "local". Relying on it would let one session's prior /connect mask
+// another session's missing restore.
+func TestMaybeRestoreProceedsEvenIfInheritedProfileIsNonLocal(t *testing.T) {
 	s, store := newTestSessionWithStore(t, "p", "k")
 	store.Set("p", "k", "pre")
-	s.currentProfile.Store("pre") // already connected in same-process recycle case
+	s.currentProfile.Store("pre") // inherited from agent — not subprocess truth
+
+	go func() {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if s.internalActive.Load() {
+				s.updateCurrentProfile("pre")
+				s.emit(core.Event{Type: core.EventResult, Done: true})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
 
 	if err := s.maybeRestoreProfileBeforePrompt(context.Background(), "流量切入了吗"); err != nil {
-		t.Errorf("currentProfile=pre should skip restore, got %v", err)
+		t.Errorf("restore should proceed despite non-local inherited profile, got %v", err)
 	}
 }
 
@@ -431,36 +450,51 @@ func TestSendAfterRestoreFailureCanRetry(t *testing.T) {
 	}
 }
 
-// ── Same-process recycle: snapshot profile bypass ────────────────────
+// ── Inherited profile must not skip restore ──────────────────────────
 
-// TestSameProcessRecycleSkipsRestore verifies that when newSession's
-// snapshot carries a non-local profile (the same-process session recycle
-// path), the very first Send bypasses auto-restore. This is the safety
-// claim in the plan's §"短路条件的安全性".
-func TestSameProcessRecycleSkipsRestore(t *testing.T) {
+// TestSendRunsRestoreEvenWhenInheritedProfileIsNonLocal verifies that
+// Send issues a hidden `/connect <profile>` on first call even when
+// `currentProfile` was seeded non-local from the agent. The freshly
+// spawned subprocess always starts in "local" — the inherited string is
+// for footer display only and must not gate restore. (Regression test
+// for the multi-session scenario where session A's /connect would have
+// masked session B's missing restore.)
+func TestSendRunsRestoreEvenWhenInheritedProfileIsNonLocal(t *testing.T) {
 	s, store, _, enc := newSessionWithEncoder(t)
 	store.Set("p", "k", "pre")
 	s.profileStore = store
 	s.project = "p"
 	s.sessionKey = "k"
-	// Simulate the recycle path: newSession set currentProfile to "pre"
-	// from snapshot before the first Send.
+	// Simulate agent-inherited profile (footer signal, not subprocess truth).
 	s.currentProfile.Store("pre")
+
+	// Drive the hidden turn to success so Send returns cleanly.
+	go func() {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if s.internalActive.Load() {
+				s.updateCurrentProfile("pre")
+				s.emit(core.Event{Type: core.EventResult, Done: true})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
 
 	if err := s.Send("普通问题", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// Only the user prompt frame — no hidden /connect.
 	frames := enc.framesCopy()
-	if len(frames) != 1 {
-		t.Fatalf("want 1 frame (user prompt only), got %d: %+v", len(frames), frames)
+	var sawRestore bool
+	for _, f := range frames {
+		if strings.Contains(asString(f, "id", ""), "-restore") {
+			sawRestore = true
+			break
+		}
 	}
-	if strings.Contains(asString(frames[0], "id", ""), "-restore") {
-		t.Errorf("recycle should skip hidden /connect, but found -restore frame: %v", frames[0])
-	}
-	if !strings.Contains(asString(frames[0], "message", ""), "普通问题") {
-		t.Errorf("expected user prompt to be written directly, got %v", frames[0])
+	if !sawRestore {
+		t.Errorf("expected hidden /connect -restore frame despite non-local inherited profile, got frames=%+v", frames)
 	}
 }
 

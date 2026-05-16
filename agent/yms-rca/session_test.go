@@ -168,6 +168,58 @@ func TestHandleConfirm_BypassPermissions_AuditLabel(t *testing.T) {
 	}
 }
 
+// TestHandleConfirm_InternalActive_NeverAutoApproves verifies that during
+// a hidden turn (e.g. auto-restore /connect), confirm requests are NOT
+// silently auto-approved by yolo/bypassPermissions. emit() routes the
+// EventPermissionRequest into handleInternalEvent which denies it —
+// the subprocess must end up with `confirmed:false`, never `true`.
+func TestHandleConfirm_InternalActive_NeverAutoApproves(t *testing.T) {
+	for _, mode := range []string{"yolo", "bypassPermissions"} {
+		t.Run(mode, func(t *testing.T) {
+			s, enc := newTestSession(t, mode)
+			// Install a hidden-turn done channel so handleInternalEvent
+			// has somewhere to signal. (runInternalPrompt would normally
+			// set this; we simulate.)
+			done := make(chan error, 1)
+			s.internalMu.Lock()
+			s.internalDone = done
+			s.internalMu.Unlock()
+			s.internalActive.Store(true)
+			defer s.internalActive.Store(false)
+
+			s.handleConfirmRequest("req-hidden", "rm", "msg")
+
+			// Hidden turn must be signalled with an error.
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatalf("hidden turn signalled success but should have failed under mode %q", mode)
+				}
+			case <-time.After(200 * time.Millisecond):
+				t.Fatalf("hidden turn was not signalled under mode %q", mode)
+			}
+
+			// Frames written to the subprocess must include confirmed:false
+			// and never confirmed:true for this id.
+			var sawDeny bool
+			for _, f := range enc.framesCopy() {
+				if f["id"] != "req-hidden" {
+					continue
+				}
+				if f["confirmed"] == true {
+					t.Fatalf("hidden turn auto-approved under mode %q: %+v", mode, f)
+				}
+				if f["confirmed"] == false {
+					sawDeny = true
+				}
+			}
+			if !sawDeny {
+				t.Errorf("expected confirmed:false frame under mode %q, frames=%+v", mode, enc.framesCopy())
+			}
+		})
+	}
+}
+
 func TestHandleConfirm_DontAsk_AutoDeny(t *testing.T) {
 	s, enc := newTestSession(t, "dontAsk")
 	s.handleConfirmRequest("req-d", "rm", "msg")

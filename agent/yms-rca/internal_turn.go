@@ -167,9 +167,9 @@ func (s *session) resetTurnLatches(prompt string) {
 }
 
 // maybeRestoreProfileBeforePrompt checks the persisted profile for this
-// (project, session_key) and — if non-local and currently disconnected —
-// runs a hidden `/connect <profile>` so the user's first message after a
-// daemon restart lands on the right MCP profile.
+// (project, session_key) and — if non-local — runs a hidden `/connect
+// <profile>` so the user's first message after a daemon restart lands on
+// the right MCP profile.
 //
 // Bypasses (no restore attempted, no error returned):
 //
@@ -177,14 +177,19 @@ func (s *session) resetTurnLatches(prompt string) {
 //   - user prompt is itself a slash command — /connect, /disconnect,
 //     /status, /help etc.: the user's explicit intent wins; we don't
 //     want to insert an MCP attach/detach cycle in front of it.
-//   - session already has a non-local currentProfile (same-process
-//     recycle scenario where snapshot carried the previous profile).
 //   - no project / session_key (programmatic test path; no relay).
 //   - no profileStore wired.
 //   - store has no entry, or entry is "local".
 //
 // If the stored profile name fails character-set validation, we clear
 // the entry and skip — depth-in-defense against hand-edited store files.
+//
+// Note: we deliberately do NOT skip when `s.currentProfileName()` is
+// non-local. That field is seeded from the agent-level last-known
+// profile for footer display, but the freshly spawned subprocess always
+// starts in "local" — so the inherited string says nothing about
+// subprocess connection state, and trusting it would let one session's
+// /connect mask another session's missing restore.
 //
 // On success returns nil and the session's currentProfileName matches the
 // stored profile. On failure returns a wrapped error; the caller is
@@ -196,12 +201,6 @@ func (s *session) maybeRestoreProfileBeforePrompt(ctx context.Context, prompt st
 	// User's slash command always wins. ParseConnectTarget is a stricter
 	// subset of isSlashCommandPrompt and is checked implicitly here.
 	if isSlashCommandPrompt(prompt) {
-		return nil
-	}
-	// Same-process recycle: cc-connect already knows we're on a non-local
-	// profile, so the subprocess is freshly /connect'd as part of
-	// newSession recycle handling.
-	if cur := s.currentProfileName(); cur != "" && cur != "local" {
 		return nil
 	}
 	if s.profileStore == nil || s.project == "" || s.sessionKey == "" {

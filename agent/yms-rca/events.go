@@ -556,6 +556,25 @@ func (s *session) handleExtensionUIRequest(raw map[string]any) {
 }
 
 func (s *session) handleConfirmRequest(id, title, message string) {
+	// Hidden turns (e.g. auto-restore /connect) must never have permission
+	// prompts auto-approved by the live permission mode — there is no user
+	// to see or override the decision. Route through the EventPermission
+	// Request channel so handleInternalEvent can deny and end the turn.
+	if s.internalActive.Load() {
+		s.registerPending(id, title)
+		s.emit(core.Event{
+			Type:      core.EventPermissionRequest,
+			RequestID: id,
+			ToolName:  title,
+			ToolInput: stripANSI(message),
+			ToolInputRaw: map[string]any{
+				"title":   title,
+				"message": message,
+				"method":  "confirm",
+			},
+		})
+		return
+	}
 	mode := s.currentMode()
 	switch mode {
 	case "yolo", "bypassPermissions":
