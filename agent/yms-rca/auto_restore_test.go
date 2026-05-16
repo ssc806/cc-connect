@@ -268,55 +268,41 @@ func TestMaybeRestoreInvokesHiddenConnect(t *testing.T) {
 	}
 }
 
-func TestMaybeRestoreFailureEmitsLocalisedText(t *testing.T) {
-	cases := []struct {
-		name       string
-		userPrompt string
-		extraEnv   []string
-		wantSub    string
-	}{
-		{"zh", "流量切入了吗", nil, "自动恢复上次 profile `pre` 失败"},
-		{"en", "did traffic cut in?", nil, "Auto-restore of last profile `pre` failed"},
-		{"ja", "プレ環境のトラフィック切替", nil, "前回の profile `pre`"},
-		{"es", "¿se conectó la pre?", nil, "restauración automática del último profile `pre`"},
-		// zh-TW unreachable via DetectLanguage; opt-in via CC_LANG override.
-		// Prompt is intentionally non-Chinese so DetectLanguage would say
-		// English — only CC_LANG can promote to zh-TW.
-		{"zh-TW via CC_LANG", "test", []string{"CC_LANG=zh-TW"}, "自動恢復上次 profile `pre` 失敗"},
-		// POSIX LANG fallback also honored.
-		{"ja via LANG", "test", []string{"LANG=ja_JP.UTF-8"}, "前回の profile `pre`"},
+// TestMaybeRestoreFailureErrorShape verifies the error returned to the
+// engine carries enough context for the user to act on it: profile name,
+// underlying cause, and a "/connect <profile>" recovery hint. Text is
+// plain English — matching the convention of all other agent errors in
+// this repo; the engine's MsgError template handles language-of-prefix.
+func TestMaybeRestoreFailureErrorShape(t *testing.T) {
+	s, store := newTestSessionWithStore(t, "p", "k")
+	store.Set("p", "k", "pre")
+
+	go func() {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if s.internalActive.Load() {
+				s.emit(core.Event{Type: core.EventError, Error: errors.New("token missing")})
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	err := s.maybeRestoreProfileBeforePrompt(context.Background(), "流量切入了吗")
+	if err == nil {
+		t.Fatal("want error, got nil")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			s, store := newTestSessionWithStore(t, "p", "k")
-			store.Set("p", "k", "pre")
-			s.extraEnv = tc.extraEnv
-
-			// Drive a failure from another goroutine.
-			go func() {
-				deadline := time.Now().Add(time.Second)
-				for time.Now().Before(deadline) {
-					if s.internalActive.Load() {
-						s.emit(core.Event{Type: core.EventError, Error: errors.New("token missing")})
-						return
-					}
-					time.Sleep(2 * time.Millisecond)
-				}
-			}()
-
-			err := s.maybeRestoreProfileBeforePrompt(context.Background(), tc.userPrompt)
-			if err == nil {
-				t.Fatalf("want error, got nil")
-			}
-			// The user-facing localised text is embedded in the error.
-			// Engine wraps it with MsgError when delivering to the platform.
-			if !strings.Contains(err.Error(), tc.wantSub) {
-				t.Errorf("error message = %q, want substring %q", err.Error(), tc.wantSub)
-			}
-			if !strings.Contains(err.Error(), "/connect pre") {
-				t.Errorf("expected '/connect pre' recovery hint, got %q", err.Error())
-			}
-		})
+	msg := err.Error()
+	for _, want := range []string{
+		"yms-rca: auto-restore profile",
+		`"pre"`,
+		"failed",
+		"token missing",         // underlying cause wrapped via %w
+		"please re-run /connect pre",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q; got %q", want, msg)
+		}
 	}
 }
 
@@ -400,8 +386,8 @@ func TestSendReleasesBusyOnRestoreFailure(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Send should fail when restore fails, got nil")
 	}
-	if !strings.Contains(err.Error(), "自动恢复") && !strings.Contains(err.Error(), "Auto-restore") {
-		t.Errorf("error should be the localised auto-restore message, got %q", err.Error())
+	if !strings.Contains(err.Error(), "yms-rca: auto-restore profile") {
+		t.Errorf("error should describe auto-restore failure, got %q", err.Error())
 	}
 
 	// CRITICAL: busy must be released so the next Send can proceed.

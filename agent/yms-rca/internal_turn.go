@@ -225,13 +225,12 @@ func (s *session) maybeRestoreProfileBeforePrompt(ctx context.Context, prompt st
 		}
 	}
 	if err := s.runInternalPrompt(ctx, "/connect "+profile, profile, defaultAutoRestoreTimeout); err != nil {
-		// Return the localised user-facing message as the Go error itself.
-		// Engine wraps Send() errors with i18n MsgError ("❌ 错误: %s") and
-		// delivers a single message to the platform, then aborts the turn —
-		// any EventText pushed to s.events at this point is discarded by
-		// engine.go's pendingSend handler, so we put everything the user
-		// needs into the error string.
-		return errors.New(renderAutoRestoreFailure(s.extraEnv, prompt, profile, err))
+		// Plain English error matches the convention of other yms-rca
+		// (and all other agent) errors in this repo; engine wraps with
+		// the i18n MsgError prefix ("❌ 错误: %s" / "❌ Error: %s") when
+		// delivering to the platform, so the localised part is the
+		// prefix while the agent-detail stays consistent.
+		return fmt.Errorf("yms-rca: auto-restore profile %q failed: %w; please re-run /connect %s", profile, err, profile)
 	}
 	return nil
 }

@@ -160,8 +160,12 @@ func TestE2E_AutoRestoreScenarioB_FailurePreservesStore(t *testing.T) {
 		MessageID:  "msg-1",
 	})
 
-	// Wait for the localised failure message to surface to the user.
-	sent := waitForPlatformMessage(t, platform, "自动恢复上次 profile `pre`")
+	// Wait for the failure message to surface to the user. The engine
+	// wraps Send() errors with its localised MsgError prefix (e.g. "❌
+	// 错误:" in zh); the agent-detail itself stays English. We anchor on
+	// the agent text since the engine's prefix is the engine's contract,
+	// not ours.
+	sent := waitForPlatformMessage(t, platform, "yms-rca: auto-restore profile")
 	combined := strings.Join(sent, "\n")
 	if !strings.Contains(combined, "/connect pre") {
 		t.Errorf("expected recovery hint '/connect pre', got %q", combined)
