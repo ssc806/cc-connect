@@ -1,11 +1,12 @@
-// Package ymsprofile reads yms-rca connection profiles to discover the
-// environment variable names referenced by their mcp.token_env field, and
-// parses cc-connect prompts to extract /connect targets.
+// Connection profile parsing for yms-rca.
 //
-// It is intentionally a small, dependency-light helper that both
-// agent/yms-rca and daemon import. It must NOT live under core/, which is
-// stdlib-only (see project CLAUDE.md). YAML parsing requires gopkg.in/yaml.v3.
-package ymsprofile
+// These helpers read ~/.yms-rca/connections/*.yaml to discover the
+// environment variable names referenced by each profile's
+// mcp.token_env field. Used both at runtime (when the user issues
+// /connect <name>) and at install time (the daemon.EnvDiscoverer
+// registered in cmd/cc-connect/plugin_agent_yms_rca.go invokes
+// DiscoverDaemonEnv to bake token values into the service file).
+package ymsagent
 
 import (
 	"fmt"
@@ -71,11 +72,11 @@ type profileShape struct {
 // to escalate that to a hard failure.
 func DiscoverConnectionTokenEnvNames(dir string) ([]ProfileTokenEnv, error) {
 	if dir == "" {
-		return nil, fmt.Errorf("ymsprofile: empty dir")
+		return nil, fmt.Errorf("yms-rca: empty dir")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("ymsprofile: read dir %s: %w", dir, err)
+		return nil, fmt.Errorf("yms-rca: read dir %s: %w", dir, err)
 	}
 
 	seen := make(map[string]string) // envName -> profileFile (first occurrence)
@@ -130,7 +131,7 @@ func DiscoverConnectionTokenEnvNames(dir string) ([]ProfileTokenEnv, error) {
 	})
 
 	if len(warnings) > 0 {
-		return out, fmt.Errorf("ymsprofile: %s", strings.Join(warnings, "; "))
+		return out, fmt.Errorf("yms-rca: %s", strings.Join(warnings, "; "))
 	}
 	return out, nil
 }
@@ -166,11 +167,11 @@ func ReadTokenEnv(dir, connection string) (envName, profileFile string, err erro
 	}
 	data, err := os.ReadFile(filepath.Join(dir, profile))
 	if err != nil {
-		return "", profile, fmt.Errorf("ymsprofile: read %s: %w", profile, err)
+		return "", profile, fmt.Errorf("yms-rca: read %s: %w", profile, err)
 	}
 	var p profileShape
 	if err := yaml.Unmarshal(data, &p); err != nil {
-		return "", profile, fmt.Errorf("ymsprofile: parse %s: %w", profile, err)
+		return "", profile, fmt.Errorf("yms-rca: parse %s: %w", profile, err)
 	}
 	return strings.TrimSpace(p.MCP.TokenEnv), profile, nil
 }

@@ -1,18 +1,12 @@
-package ymsprofile
+package ymsagent
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func writeProfile(t *testing.T, dir, name, body string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
-}
+// writeProfile lives in profile_validation_test.go; reused here.
 
 func TestDiscoverConnectionTokenEnvNames_BasicDedup(t *testing.T) {
 	dir := t.TempDir()
