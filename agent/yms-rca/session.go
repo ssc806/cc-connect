@@ -706,9 +706,18 @@ func (s *session) finalizeSubprocessExit() {
 	// There is no user-facing turn to finalize during a hidden turn
 	// (Send hasn't returned yet); the hidden caller will surface the
 	// real error via maybeRestore → Send return.
+	//
+	// Also mark the session dead and cancel its context. The engine's
+	// post-Send cleanup uses Alive() to decide whether to recycle the
+	// interactive state; without this the engine would re-use a session
+	// whose subprocess has already exited and whose stdin is closed,
+	// leading to a write-on-closed-pipe loop. This mirrors the
+	// drain-timeout branch in runInternalPrompt.
 	if s.internalActive.Load() {
 		s.signalInternalDone(fmt.Errorf("yms-rca: subprocess exited during hidden turn"))
 		s.signalInternalResult()
+		s.alive.Store(false)
+		s.cancel()
 		s.busy.Store(false)
 		return
 	}

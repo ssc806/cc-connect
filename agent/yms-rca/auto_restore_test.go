@@ -649,6 +649,13 @@ func TestSubprocessExitDuringHiddenTurnDoesNotLeakLifecycleEventResult(t *testin
 	if s.busy.Load() {
 		t.Error("busy should be cleared after subprocess exit")
 	}
+
+	// Session must be marked dead so the engine's post-Send cleanup
+	// recycles it instead of re-using a session whose subprocess has
+	// exited and whose stdin is closed.
+	if s.Alive() {
+		t.Error("session must be marked dead after subprocess exit during hidden turn — engine recycle depends on Alive()==false")
+	}
 }
 
 // TestSubprocessExitOutsideHiddenTurnStillEmitsLifecycleEventResult
