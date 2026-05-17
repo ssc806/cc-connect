@@ -520,7 +520,14 @@ func (s *session) handleExtensionUIRequest(raw map[string]any) {
 	id, _ := raw["id"].(string)
 	method, _ := raw["method"].(string)
 	if method == "setStatus" {
-		s.updateCurrentProfile(profileFromStatusEvent(raw))
+		// setStatus is an informational echo of the subprocess's current
+		// status — it can fire from /status output, periodic refreshes,
+		// or any internal state observation. It is NOT authoritative for
+		// connection state, so we update the in-memory profile (for
+		// footer display) but do NOT touch the persisted store. The
+		// authoritative env-switch path (yms-rca.env-switch message_end
+		// in handleMessageEnd) is what mutates the store.
+		s.observeStatusProfile(profileFromStatusEvent(raw))
 		return
 	}
 	if id == "" {
@@ -556,6 +563,25 @@ func (s *session) handleExtensionUIRequest(raw map[string]any) {
 }
 
 func (s *session) handleConfirmRequest(id, title, message string) {
+	// Hidden turns (e.g. auto-restore /connect) must never have permission
+	// prompts auto-approved by the live permission mode — there is no user
+	// to see or override the decision. Route through the EventPermission
+	// Request channel so handleInternalEvent can deny and end the turn.
+	if s.internalActive.Load() {
+		s.registerPending(id, title)
+		s.emit(core.Event{
+			Type:      core.EventPermissionRequest,
+			RequestID: id,
+			ToolName:  title,
+			ToolInput: stripANSI(message),
+			ToolInputRaw: map[string]any{
+				"title":   title,
+				"message": message,
+				"method":  "confirm",
+			},
+		})
+		return
+	}
 	mode := s.currentMode()
 	switch mode {
 	case "yolo", "bypassPermissions":
@@ -655,6 +681,40 @@ func (s *session) emitText(content string) {
 	s.emit(core.Event{Type: core.EventText, Content: content})
 }
 
+// observeStatusProfile updates the in-memory profile snapshot from a
+// non-authoritative source (subprocess setStatus echo). It refreshes the
+// footer and agent-level snapshot but does NOT persist — a /status echo
+// of "env: local" after a daemon restart (when the subprocess hasn't yet
+// been auto-restored) must not erase the stored non-local profile that
+// the upcoming business prompt would have restored.
+func (s *session) observeStatusProfile(profile string) {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return
+	}
+	s.currentProfile.Store(profile)
+	if s.profileUpdater != nil {
+		s.profileUpdater(profile)
+	}
+}
+
+// updateCurrentProfile is the authoritative path: it is called from the
+// yms-rca.env-switch message_end handler, which only fires when /connect
+// or /disconnect actually changed the subprocess's MCP attachment. It
+// persists the change so future daemon restarts can auto-restore; a
+// transition to "local" clears the persisted entry because the user has
+// explicitly disconnected.
+//
+// During an active hidden turn (auto-restore /connect), persistence is
+// suppressed — handleMessageEnd's env-switch dispatch does NOT go
+// through emit(), so internalActive is the only signal that lets us
+// distinguish user-driven /connect-/disconnect from subprocess events
+// emitted while draining a failed hidden /connect. The store entry that
+// triggered the hidden turn is already authoritative for the target
+// profile; an env-switch to "local" during drain (denial path) must not
+// be allowed to clobber it. The in-memory profile is still updated so
+// the footer reflects subprocess truth and runInternalPrompt's expect-
+// Profile verification works.
 func (s *session) updateCurrentProfile(profile string) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {
@@ -663,6 +723,20 @@ func (s *session) updateCurrentProfile(profile string) {
 	s.currentProfile.Store(profile)
 	if s.profileUpdater != nil {
 		s.profileUpdater(profile)
+	}
+	if s.internalActive.Load() {
+		return
+	}
+	// Persist the (project, session_key) → profile mapping so a future
+	// cc-connect daemon restart can auto-restore this session's profile.
+	// "local" is a clear: the user explicitly disconnected (or never
+	// connected), so the stored entry — if any — must go.
+	if s.profileStore != nil && s.project != "" && s.sessionKey != "" {
+		if profile == "local" {
+			s.profileStore.Clear(s.project, s.sessionKey)
+		} else {
+			s.profileStore.Set(s.project, s.sessionKey, profile)
+		}
 	}
 }
 

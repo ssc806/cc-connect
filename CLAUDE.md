@@ -130,10 +130,28 @@ if info, ok := agent.(AgentDoctorInfo); ok {
 
 ### 7. i18n
 
-All user-facing strings must go through `core/i18n.go`:
+**Engine-level user-facing messages** (anything emitted directly by `core/engine.go`
+to a platform — e.g. `MsgError`, `MsgSessionStarted`, `MsgAdminRequired`) must
+go through `core/i18n.go`:
+
 - Define a `MsgKey` constant
 - Add translations for all supported languages (EN, ZH, ZH-TW, JA, ES)
 - Use `e.i18n.T(MsgKey)` or `e.i18n.Tf(MsgKey, args...)`
+
+**Agent and platform errors** stay plain English. Return them as Go errors
+(`fmt.Errorf("youzone: ...")` / `fmt.Errorf("yms-rca: ...")`). The engine
+wraps them with the localised `MsgError` template ("❌ 错误: %s" / "❌
+Error: %s" / ...) when delivering to the user, so the user-visible
+**prefix** is localised while the agent/platform-specific **detail**
+stays English. This matches the actual convention every fork-added
+agent and platform follows (`agent/yms-rca/`, `platform/youzone/`, etc.)
+and avoids the maintenance cost of a per-agent translation table that
+would diverge from the rest of the codebase.
+
+Do **not** create agent-internal i18n template files (we deleted one — see
+PR #10). If you find yourself wanting 5-language templates for one error
+path inside an agent, the right answer is almost always "single English
+fmt.Errorf, let the engine localise the prefix".
 
 ## Code Style
 
@@ -212,7 +230,7 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
 1. **Build passes**: `go build ./...`
 2. **Tests pass**: `go test ./...`
 3. **No new hardcoded platform/agent names in core**: grep for platform names in `core/*.go`
-4. **i18n complete**: all new user-facing strings have translations for all languages
+4. **i18n complete**: new **engine-emitted** user-facing strings have translations for all languages (EN/ZH/ZH-TW/JA/ES). Agent/platform errors stay plain English — see §7.
 5. **No secrets in code**: no API keys, tokens, or credentials in source files
 
 ## Adding a New Platform
