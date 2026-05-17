@@ -104,8 +104,9 @@ func TestParseDaemonInstallArgs_NoCaptureSecretsFlagAndEnvCombine(t *testing.T) 
 
 // TestParseAndResolve_NoCaptureSecretsEndToEnd wires the CLI parser
 // straight into daemon.Resolve to prove that --no-capture-secrets
-// actually keeps the profile-derived token out of the resulting
-// EnvExtra (and the default install path includes it).
+// actually keeps the yms-rca-discovered token out of the resulting
+// EnvExtra (and the default install path includes it). It exercises
+// the discoverer registered by plugin_agent_yms_rca.go's init().
 func TestParseAndResolve_NoCaptureSecretsEndToEnd(t *testing.T) {
 	os.Unsetenv("CC_DAEMON_NO_CAPTURE_SECRETS")
 
@@ -114,6 +115,7 @@ func TestParseAndResolve_NoCaptureSecretsEndToEnd(t *testing.T) {
 		[]byte("mcp:\n  token_env: E2E_PROFILE_TOK\n"), 0o600); err != nil {
 		t.Fatalf("seed profile: %v", err)
 	}
+	t.Setenv("CC_YMS_RCA_CONNECTIONS_DIR", profileDir)
 	t.Setenv("E2E_PROFILE_TOK", "real-token-value")
 	t.Setenv("HTTPS_PROXY", "http://1.2.3.4:8080")
 
@@ -122,7 +124,6 @@ func TestParseAndResolve_NoCaptureSecretsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse default: %v", err)
 	}
-	cfg.ConnectionsDir = profileDir
 	cfg.BinaryPath = "/bin/true"
 	cfg.WorkDir = t.TempDir()
 	if err := daemon.Resolve(&cfg); err != nil {
@@ -140,7 +141,6 @@ func TestParseAndResolve_NoCaptureSecretsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse opt-out: %v", err)
 	}
-	cfg2.ConnectionsDir = profileDir
 	cfg2.BinaryPath = "/bin/true"
 	cfg2.WorkDir = t.TempDir()
 	if err := daemon.Resolve(&cfg2); err != nil {
@@ -159,7 +159,6 @@ func TestParseAndResolve_NoCaptureSecretsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse env-opt-out: %v", err)
 	}
-	cfg3.ConnectionsDir = profileDir
 	cfg3.BinaryPath = "/bin/true"
 	cfg3.WorkDir = t.TempDir()
 	if err := daemon.Resolve(&cfg3); err != nil {

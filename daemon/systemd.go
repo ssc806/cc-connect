@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 const (
@@ -62,7 +60,7 @@ func (m *systemdManager) Install(cfg Config) error {
 
 	unit := m.buildUnit(cfg)
 	// 0600: unit file may contain captured secret values (config.toml ${ENV}
-	// placeholders and yms-rca mcp.token_env vars). For system-level units
+	// placeholders and any EnvDiscoverer extension output). For system-level units
 	// (/etc/systemd/system/)
 	// the file is owned by root and remains readable by root only; for
 	// user-level units under ~/.config/systemd/user it remains owner-only.
@@ -197,7 +195,7 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if !ymsprofile.IsValidEnvName(key) {
+			if !isValidEnvName(key) {
 				slog.Warn("daemon: systemd: dropping invalid env name from EnvExtra",
 					"key", key)
 				continue

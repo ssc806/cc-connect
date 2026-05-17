@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 const (
@@ -193,7 +191,7 @@ func buildWindowsTaskScript(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if !ymsprofile.IsValidEnvName(key) {
+			if !isValidEnvName(key) {
 				slog.Warn("daemon: windows: dropping invalid env name from EnvExtra",
 					"key", key)
 				continue

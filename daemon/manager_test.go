@@ -2,19 +2,13 @@ package daemon
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-func writeProfile(t *testing.T, dir, name, body string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
-}
 
 func captureSlog(t *testing.T) (get func() string, restore func()) {
 	t.Helper()
@@ -24,14 +18,23 @@ func captureSlog(t *testing.T) (get func() string, restore func()) {
 	return func() string { return buf.String() }, func() { slog.SetDefault(prev) }
 }
 
-func TestCaptureDaemonEnvIncludesProfileTokenEnv(t *testing.T) {
-	dir := t.TempDir()
-	writeProfile(t, dir, "yms-dev.yaml", "mcp:\n  token_env: CAPTURE_TEST_TOK\n")
+// withDiscoverer registers d for the duration of the test and resets
+// the registry on cleanup so tests cannot pollute each other.
+func withDiscoverer(t *testing.T, d EnvDiscoverer) {
+	t.Helper()
+	ResetEnvDiscoverers()
+	RegisterEnvDiscoverer(d)
+	t.Cleanup(ResetEnvDiscoverers)
+}
 
+func TestCaptureDaemonEnvIncludesDiscoveredVars(t *testing.T) {
 	t.Setenv("CAPTURE_TEST_TOK", "shhh")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"CAPTURE_TEST_TOK": os.Getenv("CAPTURE_TEST_TOK")}, nil
+	})
 
-	got := captureDaemonEnv(false, dir)
+	got := captureDaemonEnv(false)
 	if got["CAPTURE_TEST_TOK"] != "shhh" {
 		t.Errorf("CAPTURE_TEST_TOK = %q, want %q", got["CAPTURE_TEST_TOK"], "shhh")
 	}
@@ -40,14 +43,13 @@ func TestCaptureDaemonEnvIncludesProfileTokenEnv(t *testing.T) {
 	}
 }
 
-func TestCaptureDaemonEnvSkipsTokenWhenNoCapture(t *testing.T) {
-	dir := t.TempDir()
-	writeProfile(t, dir, "yms-dev.yaml", "mcp:\n  token_env: CAPTURE_TEST_TOK2\n")
-
-	t.Setenv("CAPTURE_TEST_TOK2", "do-not-capture-me")
+func TestCaptureDaemonEnvSkipsDiscoverersWhenNoCapture(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"CAPTURE_TEST_TOK2": "do-not-capture-me"}, nil
+	})
 
-	got := captureDaemonEnv(true, dir)
+	got := captureDaemonEnv(true)
 	if _, ok := got["CAPTURE_TEST_TOK2"]; ok {
 		t.Errorf("CAPTURE_TEST_TOK2 must not be captured under NoCaptureSecrets")
 	}
@@ -56,27 +58,31 @@ func TestCaptureDaemonEnvSkipsTokenWhenNoCapture(t *testing.T) {
 	}
 }
 
-func TestCaptureDaemonEnvSkipsUnsetVars(t *testing.T) {
-	dir := t.TempDir()
-	writeProfile(t, dir, "yms-dev.yaml", "mcp:\n  token_env: CAPTURE_TEST_UNSET\n")
-	os.Unsetenv("CAPTURE_TEST_UNSET")
+func TestCaptureDaemonEnvDropsEmptyDiscoveredValues(t *testing.T) {
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"CAPTURE_TEST_EMPTY": ""}, nil
+	})
 
-	got := captureDaemonEnv(false, dir)
-	if _, ok := got["CAPTURE_TEST_UNSET"]; ok {
-		t.Error("unset env must not appear in captured map")
+	got := captureDaemonEnv(false)
+	if _, ok := got["CAPTURE_TEST_EMPTY"]; ok {
+		t.Error("discoverer returned empty value; must not appear in captured map")
 	}
 }
 
-func TestCaptureDaemonEnvDoesNotPanicOnMissingDir(t *testing.T) {
+func TestCaptureDaemonEnvLogsDiscovererErrorButContinues(t *testing.T) {
 	getLogs, restore := captureSlog(t)
 	defer restore()
 
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
-	got := captureDaemonEnv(false, filepath.Join(t.TempDir(), "does-not-exist"))
+	withDiscoverer(t, func() (map[string]string, error) {
+		return nil, fmt.Errorf("simulated discovery failure")
+	})
+
+	got := captureDaemonEnv(false)
 	if got["HTTPS_PROXY"] != "http://127.0.0.1:10818" {
-		t.Errorf("HTTPS_PROXY missing despite dir error: %q", got["HTTPS_PROXY"])
+		t.Errorf("HTTPS_PROXY missing despite discoverer error: %q", got["HTTPS_PROXY"])
 	}
-	if !strings.Contains(getLogs(), "yms-rca profile discovery had warnings") {
+	if !strings.Contains(getLogs(), "env discoverer reported warnings") {
 		t.Errorf("expected warning log, got: %s", getLogs())
 	}
 }
@@ -85,50 +91,60 @@ func TestCaptureDaemonEnvDropsInvalidEnvName(t *testing.T) {
 	getLogs, restore := captureSlog(t)
 	defer restore()
 
-	dir := t.TempDir()
-	writeProfile(t, dir, "yms-bad.yaml", "mcp:\n  token_env: \"BAD NAME\"\n")
-	writeProfile(t, dir, "yms-ok.yaml", "mcp:\n  token_env: CAPTURE_TEST_OK\n")
 	t.Setenv("CAPTURE_TEST_OK", "ok")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{
+			"BAD NAME":        "v",
+			"CAPTURE_TEST_OK": os.Getenv("CAPTURE_TEST_OK"),
+		}, nil
+	})
 
-	got := captureDaemonEnv(false, dir)
+	got := captureDaemonEnv(false)
 	if got["CAPTURE_TEST_OK"] != "ok" {
 		t.Errorf("valid name missing: %+v", got)
 	}
+	if _, ok := got["BAD NAME"]; ok {
+		t.Errorf("invalid name must not appear: %+v", got)
+	}
 	logs := getLogs()
-	if !strings.Contains(logs, "yms-bad.yaml") {
-		t.Errorf("expected warn mentioning yms-bad.yaml; got: %s", logs)
+	if !strings.Contains(logs, "dropping invalid env name from discoverer") {
+		t.Errorf("expected warn about invalid env name; got: %s", logs)
 	}
 }
 
 func TestResolvePropagatesNoCaptureSecrets(t *testing.T) {
-	dir := t.TempDir()
-	writeProfile(t, dir, "yms-dev.yaml", "mcp:\n  token_env: RESOLVE_TOK\n")
 	t.Setenv("RESOLVE_TOK", "v")
 	t.Setenv("HTTPS_PROXY", "http://1.2.3.4:8080")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"RESOLVE_TOK": os.Getenv("RESOLVE_TOK")}, nil
+	})
 
-	// NoCaptureSecrets=true → token NOT included.
-	cfg := Config{NoCaptureSecrets: true, ConnectionsDir: dir, BinaryPath: "/bin/true", WorkDir: t.TempDir()}
+	// NoCaptureSecrets=true → discoverer skipped.
+	cfg := Config{NoCaptureSecrets: true, BinaryPath: "/bin/true", WorkDir: t.TempDir()}
 	if err := Resolve(&cfg); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if _, ok := cfg.EnvExtra["RESOLVE_TOK"]; ok {
-		t.Errorf("Resolve must skip token under NoCaptureSecrets; EnvExtra=%+v", cfg.EnvExtra)
+		t.Errorf("Resolve must skip discoverer under NoCaptureSecrets; EnvExtra=%+v", cfg.EnvExtra)
 	}
 	if cfg.EnvExtra["HTTPS_PROXY"] == "" {
 		t.Errorf("Resolve must still capture proxy vars; EnvExtra=%+v", cfg.EnvExtra)
 	}
 
-	// NoCaptureSecrets=false → token IS included.
-	cfg2 := Config{NoCaptureSecrets: false, ConnectionsDir: dir, BinaryPath: "/bin/true", WorkDir: t.TempDir()}
+	// NoCaptureSecrets=false → discoverer runs.
+	cfg2 := Config{NoCaptureSecrets: false, BinaryPath: "/bin/true", WorkDir: t.TempDir()}
 	if err := Resolve(&cfg2); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if cfg2.EnvExtra["RESOLVE_TOK"] != "v" {
-		t.Errorf("Resolve must capture token when NoCaptureSecrets=false; EnvExtra=%+v", cfg2.EnvExtra)
+		t.Errorf("Resolve must capture discoverer output when NoCaptureSecrets=false; EnvExtra=%+v", cfg2.EnvExtra)
 	}
 }
 
 func TestResolveCapturesConfigEnvPlaceholders(t *testing.T) {
+	ResetEnvDiscoverers()
+	t.Cleanup(ResetEnvDiscoverers)
+
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "config.toml"), []byte(`
 [[projects]]
@@ -158,7 +174,7 @@ app_secret = "${CAPTURE_CONFIG_FEISHU_SECRET}"
 	t.Setenv("CAPTURE_CONFIG_FEISHU_APP_ID", "cli_test")
 	t.Setenv("CAPTURE_CONFIG_FEISHU_SECRET", "feishu-secret")
 
-	cfg := Config{BinaryPath: "/bin/true", WorkDir: workDir, ConnectionsDir: filepath.Join(t.TempDir(), "missing")}
+	cfg := Config{BinaryPath: "/bin/true", WorkDir: workDir}
 	if err := Resolve(&cfg); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -175,6 +191,9 @@ app_secret = "${CAPTURE_CONFIG_FEISHU_SECRET}"
 }
 
 func TestResolveNoCaptureSecretsSkipsConfigEnvPlaceholders(t *testing.T) {
+	ResetEnvDiscoverers()
+	t.Cleanup(ResetEnvDiscoverers)
+
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "config.toml"), []byte(`
 [[projects]]
@@ -195,7 +214,6 @@ access_token = "${CAPTURE_CONFIG_SKIP}"
 		NoCaptureSecrets: true,
 		BinaryPath:       "/bin/true",
 		WorkDir:          workDir,
-		ConnectionsDir:   filepath.Join(t.TempDir(), "missing"),
 	}
 	if err := Resolve(&cfg); err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -209,6 +227,9 @@ access_token = "${CAPTURE_CONFIG_SKIP}"
 }
 
 func TestResolveIgnoresCommentedConfigEnvPlaceholders(t *testing.T) {
+	ResetEnvDiscoverers()
+	t.Cleanup(ResetEnvDiscoverers)
+
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "config.toml"), []byte(`
 # access_token = "${CAPTURE_CONFIG_COMMENTED}"
@@ -220,7 +241,7 @@ level = "info"
 	}
 	t.Setenv("CAPTURE_CONFIG_COMMENTED", "secret")
 
-	cfg := Config{BinaryPath: "/bin/true", WorkDir: workDir, ConnectionsDir: filepath.Join(t.TempDir(), "missing")}
+	cfg := Config{BinaryPath: "/bin/true", WorkDir: workDir}
 	if err := Resolve(&cfg); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
