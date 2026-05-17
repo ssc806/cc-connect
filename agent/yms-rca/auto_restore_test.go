@@ -650,16 +650,77 @@ func TestHiddenTurnDrainSuppressesTrailingEvents(t *testing.T) {
 	}
 eventsChecked:
 
-	// Store must still hold "pre" — the trailing env-switch to "local"
-	// arrived during the suppressed drain window and (a) should not
-	// have leaked, (b) per Finding 2b separation, env-switch path itself
-	// would persist; but the safeguard is that drain runs handleInternal
-	// Event which drops EventText/Thinking/etc. The message_end env-
-	// switch handler also fires handleEvent → updateCurrentProfile. Note:
-	// this assertion documents what we observe today; if env-switch ever
-	// fires during drain it WILL clear the store. The user-visible leak
-	// is the more critical concern and is fully blocked above.
-	_ = store // store assertion left as documentation; see Finding 2b tests
+	// Store must still hold "pre". The trailing env-switch to "local"
+	// arrived during the drain window; updateCurrentProfile must skip
+	// the store mutation under internalActive so a denial-path env-
+	// switch can't erase the auto-restore target.
+	if got := store.Get("p", "k"); got != "pre" {
+		t.Errorf("store should still hold pre after denial-path env-switch during drain, got %q", got)
+	}
+}
+
+// TestEnvSwitchDuringHiddenDrainDoesNotMutateStore is the focused
+// regression test for Finding 3 from PR #10 review round 3: env-switch
+// fires via handleMessageEnd (NOT via emit), so internalActive is the
+// only signal that lets updateCurrentProfile distinguish a real user-
+// driven /disconnect from a denial-path env-switch in a failing hidden
+// /connect.
+func TestEnvSwitchDuringHiddenDrainDoesNotMutateStore(t *testing.T) {
+	t.Run("denial path env-switch to local must NOT clear store", func(t *testing.T) {
+		s, store := newTestSessionWithStore(t, "p", "k")
+		store.Set("p", "k", "pre")
+		s.internalActive.Store(true)
+		defer s.internalActive.Store(false)
+
+		// Simulate yms-rca emitting yms-rca.env-switch to=local during
+		// the drain of a failed /connect pre (e.g. permission denied).
+		emitEnvSwitch(s, "local")
+
+		if got := store.Get("p", "k"); got != "pre" {
+			t.Errorf("store should hold pre after drain env-switch local, got %q", got)
+		}
+		// In-memory still reflects subprocess truth so the footer is
+		// honest and runInternalPrompt's expectProfile check can fail.
+		if got := s.currentProfileName(); got != "local" {
+			t.Errorf("in-memory profile should reflect subprocess truth, got %q", got)
+		}
+	})
+
+	t.Run("env-switch to other profile during drain must NOT persist", func(t *testing.T) {
+		s, store := newTestSessionWithStore(t, "p", "k")
+		store.Set("p", "k", "pre")
+		s.internalActive.Store(true)
+		defer s.internalActive.Store(false)
+
+		// Subprocess emits env-switch to a different profile during
+		// drain — store stays as "pre" (the auto-restore target).
+		emitEnvSwitch(s, "dev")
+
+		if got := store.Get("p", "k"); got != "pre" {
+			t.Errorf("store should hold pre, got %q", got)
+		}
+	})
+
+	t.Run("env-switch outside hidden turn still persists", func(t *testing.T) {
+		// User-driven /connect dev — internalActive=false — must still
+		// persist normally.
+		s, store := newTestSessionWithStore(t, "p", "k")
+		emitEnvSwitch(s, "dev")
+		if got := store.Get("p", "k"); got != "dev" {
+			t.Errorf("user env-switch should persist, got %q", got)
+		}
+	})
+
+	t.Run("env-switch local outside hidden turn still clears store", func(t *testing.T) {
+		// User-driven /disconnect — internalActive=false — must still
+		// clear the store as before.
+		s, store := newTestSessionWithStore(t, "p", "k")
+		store.Set("p", "k", "pre")
+		emitEnvSwitch(s, "local")
+		if got := store.Get("p", "k"); got != "" {
+			t.Errorf("user /disconnect should clear store, got %q", got)
+		}
+	})
 }
 
 func TestSignalInternalDoneDoesNotDeadlockOnDoubleSignal(t *testing.T) {

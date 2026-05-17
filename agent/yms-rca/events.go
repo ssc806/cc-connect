@@ -704,6 +704,17 @@ func (s *session) observeStatusProfile(profile string) {
 // persists the change so future daemon restarts can auto-restore; a
 // transition to "local" clears the persisted entry because the user has
 // explicitly disconnected.
+//
+// During an active hidden turn (auto-restore /connect), persistence is
+// suppressed — handleMessageEnd's env-switch dispatch does NOT go
+// through emit(), so internalActive is the only signal that lets us
+// distinguish user-driven /connect-/disconnect from subprocess events
+// emitted while draining a failed hidden /connect. The store entry that
+// triggered the hidden turn is already authoritative for the target
+// profile; an env-switch to "local" during drain (denial path) must not
+// be allowed to clobber it. The in-memory profile is still updated so
+// the footer reflects subprocess truth and runInternalPrompt's expect-
+// Profile verification works.
 func (s *session) updateCurrentProfile(profile string) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {
@@ -712,6 +723,9 @@ func (s *session) updateCurrentProfile(profile string) {
 	s.currentProfile.Store(profile)
 	if s.profileUpdater != nil {
 		s.profileUpdater(profile)
+	}
+	if s.internalActive.Load() {
+		return
 	}
 	// Persist the (project, session_key) → profile mapping so a future
 	// cc-connect daemon restart can auto-restore this session's profile.
