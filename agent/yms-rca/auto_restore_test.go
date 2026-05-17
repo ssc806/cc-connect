@@ -839,4 +839,3 @@ func TestSignalInternalDoneDoesNotDeadlockOnDoubleSignal(t *testing.T) {
 		t.Errorf("first signal should win (nil), got %v", err)
 	}
 }
-
