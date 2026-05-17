@@ -686,6 +686,33 @@ func (s *session) readStdout(r io.ReadCloser) {
 		}
 	}
 
+	s.finalizeSubprocessExit()
+}
+
+// finalizeSubprocessExit is the tail of readStdout, factored out so unit
+// tests can drive the lifecycle without spawning a real subprocess. It
+// emits the final EventResult lifecycle signal — or, if a hidden turn is
+// in flight, drives the hidden lifecycle to completion instead, so the
+// hidden caller unblocks immediately and the synthetic EventResult does
+// not leak past the hidden-turn boundary.
+func (s *session) finalizeSubprocessExit() {
+	// If a hidden turn was in flight, drive its lifecycle to completion
+	// so runInternalPrompt unblocks immediately instead of waiting out
+	// the drain timeout, and SKIP the lifecycle EventResult: tryEmit
+	// bypasses emit's internalActive routing, so emitting it here would
+	// leak a synthetic EventResult to s.events that the engine would
+	// treat as a successful user-turn result — hiding the auto-restore
+	// failure and effectively delivering an empty reply to the platform.
+	// There is no user-facing turn to finalize during a hidden turn
+	// (Send hasn't returned yet); the hidden caller will surface the
+	// real error via maybeRestore → Send return.
+	if s.internalActive.Load() {
+		s.signalInternalDone(fmt.Errorf("yms-rca: subprocess exited during hidden turn"))
+		s.signalInternalResult()
+		s.busy.Store(false)
+		return
+	}
+
 	// Emit a final EventResult so the engine can finalise the turn.
 	// Use tryEmit: when Close() has cancelled ctx, s.emit would bail on
 	// ctx.Done() and drop this lifecycle signal — but the events channel

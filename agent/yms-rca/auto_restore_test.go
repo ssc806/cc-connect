@@ -591,6 +591,94 @@ func TestRunInternalPromptHonorsContextCancellation(t *testing.T) {
 	}
 }
 
+// ── Subprocess exit during hidden turn ───────────────────────────────
+
+// TestSubprocessExitDuringHiddenTurnDoesNotLeakLifecycleEventResult is
+// the regression test for PR #10 review round 4. readStdout's tail uses
+// tryEmit() to push a synthetic lifecycle EventResult — which bypasses
+// emit()'s internalActive routing. Without the fix that EventResult
+// would land in s.events and the engine would treat it as a successful
+// user-turn result (delivering an empty reply and hiding the underlying
+// auto-restore failure). It would also leave runInternalPrompt's drain
+// waiting on internalResult until the drain timeout.
+func TestSubprocessExitDuringHiddenTurnDoesNotLeakLifecycleEventResult(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+
+	// Simulate runInternalPrompt being mid-flight: hidden lifecycle
+	// channels installed and internalActive=true.
+	done := make(chan error, 1)
+	result := make(chan struct{})
+	s.internalMu.Lock()
+	s.internalDone = done
+	s.internalResult = result
+	s.internalMu.Unlock()
+	s.internalActive.Store(true)
+	s.busy.Store(true)
+
+	// Trigger readStdout's exit tail.
+	s.finalizeSubprocessExit()
+
+	// Hidden caller must be unblocked with an error (not nil), so
+	// runInternalPrompt returns rather than hanging on drain.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Errorf("hidden done signal must carry an error, got nil")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("subprocess exit did not signal hidden done")
+	}
+
+	// Drain channel must be closed so runInternalPrompt's drain returns
+	// immediately rather than waiting drain timeout.
+	select {
+	case <-result:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("subprocess exit did not signal hidden result; drain would block")
+	}
+
+	// CRITICAL: no synthetic EventResult may have leaked to s.events.
+	// Otherwise the engine treats the hidden turn as a successful user
+	// turn and delivers an empty reply that masks the real failure.
+	select {
+	case evt := <-s.events:
+		t.Errorf("lifecycle EventResult leaked to user channel during hidden turn: %+v", evt)
+	default:
+	}
+
+	if s.busy.Load() {
+		t.Error("busy should be cleared after subprocess exit")
+	}
+}
+
+// TestSubprocessExitOutsideHiddenTurnStillEmitsLifecycleEventResult
+// guards the non-hidden path: the engine relies on the lifecycle Event
+// Result to finalize a user turn that was in flight when the subprocess
+// died, so we must keep emitting it when no hidden turn is active.
+func TestSubprocessExitOutsideHiddenTurnStillEmitsLifecycleEventResult(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	// internalActive is false by default — no hidden turn.
+
+	s.finalizeSubprocessExit()
+
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventResult {
+			t.Errorf("expected EventResult, got %s", evt.Type)
+		}
+		if !evt.Done {
+			t.Error("expected Done=true")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("lifecycle EventResult was not emitted outside hidden turn")
+	}
+
+	if s.busy.Load() {
+		t.Error("busy should be cleared")
+	}
+}
+
 // ── Trailing-event suppression after hidden turn signals failure ─────
 
 // TestHiddenTurnDrainSuppressesTrailingEvents verifies the PR #10
