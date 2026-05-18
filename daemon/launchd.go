@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 const (
@@ -51,8 +49,9 @@ func (m *launchdManager) Install(cfg Config) error {
 
 	plist := buildPlist(cfg)
 	// 0600: plist may contain captured secret values (config.toml ${ENV}
-	// placeholders and yms-rca mcp.token_env vars). user-only LaunchAgents
-	// path; root can still read but that is the user's own machine boundary.
+	// placeholders and any EnvDiscoverer extension output). user-only
+	// LaunchAgents path; root can still read but that is the user's own
+	// machine boundary.
 	// WriteFile only applies perm on
 	// create, so Chmod afterwards is required to fix reinstalls of files
 	// that pre-existed at 0644 from earlier cc-connect versions.
@@ -268,7 +267,7 @@ func renderEnvExtraPlist(envExtra map[string]string) string {
 			// Template owns this key — do not let EnvExtra override it.
 			continue
 		}
-		if !ymsprofile.IsValidEnvName(k) {
+		if !isValidEnvName(k) {
 			slog.Warn("daemon: launchd: dropping invalid env name from EnvExtra",
 				"key", k)
 			continue

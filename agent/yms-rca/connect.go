@@ -1,4 +1,4 @@
-package ymsprofile
+package ymsagent
 
 import (
 	"strings"

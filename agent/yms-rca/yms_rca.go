@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
-	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 func init() {
@@ -107,7 +106,7 @@ func (a *Agent) validateConnectionTokenEnv(target string) error {
 	if dir == "" {
 		return nil
 	}
-	envName, profile, err := ymsprofile.ReadTokenEnv(dir, target)
+	envName, profile, err := ReadTokenEnv(dir, target)
 	if err != nil {
 		// Read/parse failure — let yms-rca surface the underlying issue.
 		slog.Warn("yms-rca: profile read failed during connect validation",
@@ -117,7 +116,7 @@ func (a *Agent) validateConnectionTokenEnv(target string) error {
 	if profile == "" || envName == "" {
 		return nil
 	}
-	if !ymsprofile.IsValidEnvName(envName) {
+	if !IsValidEnvName(envName) {
 		return fmt.Errorf("yms-rca: connection %q profile %s declares invalid env name %q; fix the profile's mcp.token_env",
 			target, profile, envName)
 	}
@@ -133,7 +132,7 @@ func (a *Agent) effectiveConnectionsDir() string {
 	if a.connectionsDir != "" {
 		return a.connectionsDir
 	}
-	return ymsprofile.DefaultConnectionsDir()
+	return DefaultConnectionsDir()
 }
 
 // warnMissingProfileTokenEnvs scans all yms-rca connection profiles and
@@ -145,7 +144,7 @@ func (a *Agent) warnMissingProfileTokenEnvs() {
 	if dir == "" {
 		return
 	}
-	entries, err := ymsprofile.DiscoverConnectionTokenEnvNames(dir)
+	entries, err := DiscoverConnectionTokenEnvNames(dir)
 	if err != nil {
 		// Surface as warn (profile parse warnings or dir-missing); do not
 		// abort. dir-missing on a fresh install is expected.

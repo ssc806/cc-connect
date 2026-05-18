@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 const (
@@ -28,15 +27,12 @@ type Config struct {
 	EnvPATH    string            // capture user's PATH so agents are accessible
 	EnvExtra   map[string]string // selected environment variables needed by the service runtime
 	// NoCaptureSecrets, when true, restricts the install-time env capture to
-	// proxy-related variables only and skips config.toml ${ENV} placeholders
-	// and yms-rca profile-derived mcp.token_env names. Operators who'd rather
-	// inject secrets via keychain / `secret-tool` / EnvironmentFile= set this
-	// to keep token values out of the service manager files on disk.
+	// proxy-related variables only and skips both the config.toml ${ENV}
+	// placeholder scan and any extension discoverers registered via
+	// RegisterEnvDiscoverer. Operators who'd rather inject secrets via
+	// keychain / `secret-tool` / EnvironmentFile= set this to keep token
+	// values out of the service manager files on disk.
 	NoCaptureSecrets bool
-	// ConnectionsDir overrides the yms-rca connections directory scanned at
-	// install time to discover mcp.token_env names. Empty = default
-	// (~/.yms-rca/connections).
-	ConnectionsDir string
 }
 
 type Status struct {
@@ -147,7 +143,7 @@ func Resolve(cfg *Config) error {
 		cfg.EnvPATH = os.Getenv("PATH")
 	}
 	if len(cfg.EnvExtra) == 0 {
-		cfg.EnvExtra = captureDaemonEnv(cfg.NoCaptureSecrets, cfg.ConnectionsDir)
+		cfg.EnvExtra = captureDaemonEnv(cfg.NoCaptureSecrets)
 		if !cfg.NoCaptureSecrets {
 			captureConfigEnvPlaceholders(filepath.Join(cfg.WorkDir, "config.toml"), cfg.EnvExtra)
 		}
@@ -157,15 +153,15 @@ func Resolve(cfg *Config) error {
 
 var configEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// captureDaemonEnv builds the EnvExtra map that gets baked into the
-// installed service file. The proxy allowlist is always included; the
-// yms-rca profile-derived mcp.token_env names are included unless the
-// caller opts out via NoCaptureSecrets.
+// captureDaemonEnv builds the EnvExtra map baked into the installed
+// service file. Proxy-related vars are always captured. When
+// noCaptureSecrets is false, every registered EnvDiscoverer is also
+// invoked and its (envName -> value) pairs are merged in.
 //
-// Token values are *read* from os.LookupEnv to populate the result map,
-// but never logged. Missing variables are silently skipped — the
-// agent/yms-rca New() warn path handles per-profile user diagnostics.
-func captureDaemonEnv(noCaptureSecrets bool, connectionsDir string) map[string]string {
+// Discoverer errors are logged but never fail the install — the
+// daemon's job is to install the service; agents surface their own
+// per-feature warnings at runtime.
+func captureDaemonEnv(noCaptureSecrets bool) map[string]string {
 	env := make(map[string]string)
 	proxyKeys := []string{
 		"http_proxy", "https_proxy", "no_proxy",
@@ -182,33 +178,22 @@ func captureDaemonEnv(noCaptureSecrets bool, connectionsDir string) map[string]s
 		return env
 	}
 
-	dir := connectionsDir
-	if dir == "" {
-		dir = ymsprofile.DefaultConnectionsDir()
-	}
-	if dir == "" {
-		return env
-	}
-	entries, err := ymsprofile.DiscoverConnectionTokenEnvNames(dir)
-	if err != nil {
-		// Discovery warnings (invalid env names, parse errors, or
-		// dir-missing) are non-fatal: do not block install. The
-		// agent/yms-rca New() startup will also surface profile-level
-		// warnings at runtime.
-		slog.Warn("daemon: yms-rca profile discovery had warnings",
-			"dir", dir, "err", err)
-	}
-	for _, e := range entries {
-		// envNameRegexp inside ymsprofile already filters invalid names;
-		// double-check belt-and-suspenders because daemon files render
-		// these as keys into systemd/launchd/PowerShell.
-		if !ymsprofile.IsValidEnvName(e.EnvName) {
-			slog.Warn("daemon: dropping invalid env name from profile",
-				"profile", e.ProfileFile, "env", e.EnvName)
-			continue
+	for i, d := range snapshotEnvDiscoverers() {
+		extra, err := d()
+		if err != nil {
+			slog.Warn("daemon: env discoverer reported warnings",
+				"index", i, "err", err)
 		}
-		if v, ok := os.LookupEnv(e.EnvName); ok && v != "" {
-			env[e.EnvName] = v
+		for k, v := range extra {
+			if !isValidEnvName(k) {
+				slog.Warn("daemon: dropping invalid env name from discoverer",
+					"index", i, "key", k)
+				continue
+			}
+			if v == "" {
+				continue
+			}
+			env[k] = v
 		}
 	}
 	return env

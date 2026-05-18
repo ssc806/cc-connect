@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
-	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 // errWriteTimeout is returned by writeFrameWithTimeout when the underlying
@@ -286,7 +285,7 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	}
 	// Validate /connect <target> BEFORE the busy CAS so we don't have to
 	// release it on the error path. The check is read-only.
-	if target, ok := ymsprofile.ParseConnectTarget(prompt); ok {
+	if target, ok := ParseConnectTarget(prompt); ok {
 		if err := s.cfg.validateConnectionTokenEnv(target); err != nil {
 			return err
 		}
