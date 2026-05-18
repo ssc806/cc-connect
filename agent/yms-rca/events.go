@@ -397,6 +397,16 @@ func (s *session) handleAssistantMessageEnd(msg map[string]any) {
 			s.emitText(suffix)
 		}
 	}
+	// assistantText is a delta↔message_end dedup buffer scoped to a single
+	// LLM call, NOT to the whole turn. Reset it here so the next LLM call
+	// in the same turn starts from empty and assistantTextEndSuffix doesn't
+	// see this call's text as a leading prefix that the next call's
+	// finalText must extend. Without this reset a multi-LLM-call turn (e.g.
+	// "resolve appCode" → "grep logs" → "summarize") falls into the default
+	// branch of assistantTextEndSuffix and re-emits the latest call's text
+	// verbatim, which on non-streaming platforms (weixin) shows up as a
+	// duplicate message just before the final EventResult.
+	s.resetAssistantText()
 	if hasToolCall {
 		s.awaitingPostToolSummary.Store(true)
 		s.postToolTextEmitted.Store(false)
