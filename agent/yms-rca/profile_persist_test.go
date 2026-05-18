@@ -126,6 +126,43 @@ func TestObserveStatusProfileUpdatesInMemoryButDoesNotPersist(t *testing.T) {
 	}
 }
 
+// TestProfileStorePersistsOnlyAuthoritativeEnvSwitch is the cross-confirming
+// regression for Phase 2: setStatus and env-switch both flip profileObserved
+// (so the footer can render the current subprocess's truth), but only
+// env-switch is allowed to persist the (project, session_key) → profile entry.
+func TestProfileStorePersistsOnlyAuthoritativeEnvSwitch(t *testing.T) {
+	t.Run("setStatus updates footer state but does not persist", func(t *testing.T) {
+		s, store := newTestSessionWithStore(t, "p", "k")
+		s.observeStatusProfile("yms-dev")
+		if !s.profileObserved.Load() {
+			t.Error("setStatus must mark profile observed (footer-gate-on)")
+		}
+		if got := store.Get("p", "k"); got != "" {
+			t.Errorf("setStatus must not persist; store = %q", got)
+		}
+	})
+
+	t.Run("env-switch updates footer state AND persists", func(t *testing.T) {
+		s, store := newTestSessionWithStore(t, "p", "k")
+		s.updateCurrentProfile("yms-dev")
+		if !s.profileObserved.Load() {
+			t.Error("env-switch must mark profile observed (footer-gate-on)")
+		}
+		if got := store.Get("p", "k"); got != "yms-dev" {
+			t.Errorf("env-switch must persist; store = %q, want yms-dev", got)
+		}
+	})
+
+	t.Run("env-switch to local clears persisted entry", func(t *testing.T) {
+		s, store := newTestSessionWithStore(t, "p", "k")
+		store.Set("p", "k", "yms-dev")
+		s.updateCurrentProfile("local")
+		if got := store.Get("p", "k"); got != "" {
+			t.Errorf("env-switch local must clear store; got %q", got)
+		}
+	})
+}
+
 func TestParseProjectAndSessionKeyMissingFields(t *testing.T) {
 	project, sessionKey := parseProjectAndSessionKey([]string{"PATH=/usr/bin"})
 	if project != "" || sessionKey != "" {

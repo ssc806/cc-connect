@@ -134,6 +134,14 @@ type session struct {
 	// inside the subprocess. It is rendered as an agent-native footer.
 	currentProfile atomic.Value // string
 	profileUpdater func(string)
+	// profileObserved gates emitProfileFooter — true only after the CURRENT
+	// subprocess has reported its real profile via yms-rca.env-switch or
+	// setStatus yms-env. The inherited s.currentProfile value (seeded from
+	// the agent-level snapshot at newSession time) is fine for in-session
+	// state continuity (logs, status reads, etc.) but cannot stand in for
+	// a real-connection footer — a fresh subprocess always starts in
+	// "local" regardless of what the previous session reported.
+	profileObserved atomic.Bool
 	// turnTextEmitted is set once a visible EventText is emitted for the
 	// current turn. It prevents error-only turns from sending footer-only replies.
 	turnTextEmitted atomic.Bool
