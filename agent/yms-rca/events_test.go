@@ -1258,6 +1258,183 @@ func TestHandleEvent_TextAndToolCallAssistantMessageEndWaitsForSummary(t *testin
 	}
 }
 
+func TestHandleEvent_PostToolTextWithAnotherToolCallDoesNotFinalize(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type":      "toolCall",
+				"id":        "tc-hosts",
+				"name":      "pre__ymc.pod_log_hosts",
+				"arguments": map[string]any{"app": "iuap-apcom-workbench"},
+			}},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 100.0, "output": 30.0},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 1.0},
+	})
+	_ = drainEvents(t, s, 100*time.Millisecond)
+
+	s.handleEvent(map[string]any{
+		"type":       "tool_execution_end",
+		"toolCallId": "tc-hosts",
+		"toolName":   "pre__ymc.pod_log_hosts",
+		"result":     `{"hosts":["10.5.3.143"]}`,
+		"status":     "completed",
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "工作台有 11 个 watcher 节点，继续 grep 业务日志。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{
+					"type": "text",
+					"text": "工作台有 11 个 watcher 节点，继续 grep 业务日志。",
+				},
+				map[string]any{
+					"type":      "toolCall",
+					"id":        "tc-grep",
+					"name":      "pre__ymc.pod_log_grep",
+					"arguments": map[string]any{"app": "iuap-apcom-workbench", "pattern": "ERROR|Exception"},
+				},
+			},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 180.0, "output": 40.0},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 1.0},
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("intermediate text before another tool call finalized the turn: %+v", evts)
+		}
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared before the final post-tool summary")
+	}
+
+	s.handleEvent(map[string]any{
+		"type":       "tool_execution_end",
+		"toolCallId": "tc-grep",
+		"toolName":   "pre__ymc.pod_log_grep",
+		"result":     `{"hits":[{"line":"ERROR waiting for domain"}]}`,
+		"status":     "completed",
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type": "text",
+				"text": "业务日志总结：主要是租户开通等待领域服务。",
+			}},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 0.0},
+	})
+
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	var gotSummary, gotResult bool
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "业务日志总结") {
+			gotSummary = true
+		}
+		if e.Type == core.EventResult && e.Done {
+			gotResult = true
+		}
+	}
+	if !gotSummary {
+		t.Fatalf("missing final summary text: %+v", evts)
+	}
+	if !gotResult {
+		t.Fatalf("missing final result after summary: %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Fatal("busy not cleared after final summary")
+	}
+}
+
+func TestHandleEvent_PostToolTextDefersAgentEndUntilTurnEnd(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.awaitingPostToolSummary.Store(true)
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "先说明一句，然后继续调用工具。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 200.0, "output": 50.0},
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("agent_end finalized before turn_end established whether tools were used: %+v", evts)
+		}
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared before turn_end")
+	}
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "先说明一句，然后继续调用工具。"},
+				map[string]any{
+					"type":      "toolCall",
+					"id":        "tc-more",
+					"name":      "pre__ymc.pod_log_grep",
+					"arguments": map[string]any{"pattern": "ERROR"},
+				},
+			},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 1.0},
+	})
+
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("tool-call turn finalized after turn_end with tools: %+v", evts)
+		}
+	}
+}
+
 // Regression for code-review HIGH: a slash-command turn (no agent_end)
 // must still clear busy and emit EventResult on turn_end, otherwise the
 // next Send is permanently refused with "previous turn still running".

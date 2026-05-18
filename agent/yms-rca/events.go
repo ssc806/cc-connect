@@ -399,6 +399,7 @@ func (s *session) handleAssistantMessageEnd(msg map[string]any) {
 	}
 	if hasToolCall {
 		s.awaitingPostToolSummary.Store(true)
+		s.postToolTextEmitted.Store(false)
 		return
 	}
 	s.assistantMessageEnded.Store(true)
@@ -410,6 +411,11 @@ func (s *session) handleAgentEnd(raw map[string]any) {
 	// clear busy here — the universal turn boundary is turn_end. Emit the
 	// EventResult once final assistant text is available; turn_end's emit will
 	// be a no-op thanks to maybeEmitTurnResult's atomic dedup.
+	if s.awaitingPostToolSummary.Load() {
+		s.deferTurnResult(raw, false)
+		go s.requestSessionStats()
+		return
+	}
 	s.completeTurnResult(raw, false)
 	// async refresh of context window after the LLM call.
 	go s.requestSessionStats()
