@@ -1551,6 +1551,179 @@ func TestSend_ResetsTurnEmitLatch(t *testing.T) {
 	}
 }
 
+// Regression: a turn that makes TWO LLM calls, each carrying its own
+// text + toolCall, must not emit the second LLM call's text twice.
+//
+// Before the fix, `s.assistantText` (the dedup buffer used by
+// assistantTextEndSuffix) only got reset at turn boundary (Send →
+// resetTurnLatches). Across LLM calls within the same turn the buffer
+// kept accumulating, so when LLM call 2's message_end finalText
+// ("现在需要查找…") was compared against the cumulative buffer
+// ("我来帮你…\n现在需要查找…"), neither `==` nor HasPrefix matched —
+// assistantTextEndSuffix fell to the `default` branch and re-emitted
+// the full finalText, producing a duplicate EventText. On weixin (no
+// MessageUpdater) that duplicate showed up as a second message: the
+// pre-flush at toolCall B sent the delta version (no footer), then
+// EventResult's "unsent" branch sent the duplicated version + profile
+// footer.
+//
+// The test models the real event order observed in pi-rpc:
+//   text_delta → message_end(text+toolCall) → tool_execution_start →
+//   tool_execution_end. tool_execution_start is what actually triggers
+//   EventToolUse (engine's pre-flush); message_end with toolCall only
+//   updates internal latches.
+func TestHandleEvent_TwoLLMCallsEachWithMessageEnd_NoDuplicateEmit(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.sessionID.Store("sid-multi")
+
+	// --- LLM call 1: text + toolCall A ---
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "我来帮你分析事件中心服务的业务日志。首先需要确认该服务的 appCode。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "我来帮你分析事件中心服务的业务日志。首先需要确认该服务的 appCode。"},
+				map[string]any{
+					"type":      "toolCall",
+					"id":        "tc-A",
+					"name":      "pre__ymscloud.resolve_app",
+					"arguments": map[string]any{"name": "事件中心服务"},
+				},
+			},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "tool_execution_start", "toolCallId": "tc-A", "toolName": "pre__ymscloud.resolve_app",
+		"arguments": map[string]any{"name": "事件中心服务"},
+	})
+	s.handleEvent(map[string]any{
+		"type": "tool_execution_end", "toolCallId": "tc-A", "toolName": "pre__ymscloud.resolve_app",
+		"result": `{"appCode":"event-center"}`, "status": "completed",
+	})
+
+	// --- LLM call 2: text + toolCall B ---
+	// The dedup buffer at this point (pre-fix) carries call 1's text.
+	// When call 2's message_end fires with finalText="现在需要查找…",
+	// the buggy default branch re-emits the full finalText.
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "现在需要查找\"事件中心服务\"的 appCode。让我在 pre 环境查询：",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "现在需要查找\"事件中心服务\"的 appCode。让我在 pre 环境查询："},
+				map[string]any{
+					"type":      "toolCall",
+					"id":        "tc-B",
+					"name":      "pre__ymc.pod_log_grep",
+					"arguments": map[string]any{"app": "event-center", "pattern": "ERROR"},
+				},
+			},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "tool_execution_start", "toolCallId": "tc-B", "toolName": "pre__ymc.pod_log_grep",
+		"arguments": map[string]any{"app": "event-center", "pattern": "ERROR"},
+	})
+	s.handleEvent(map[string]any{
+		"type": "tool_execution_end", "toolCallId": "tc-B", "toolName": "pre__ymc.pod_log_grep",
+		"result": `{"hits":[{"line":"ERROR domain timeout"}]}`, "status": "completed",
+	})
+
+	// --- LLM call 3: final summary (no toolCall) ---
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "近 15 分钟主要错误：领域服务超时。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"type": "text", "text": "近 15 分钟主要错误：领域服务超时。"}},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 500.0, "output": 80.0},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 0.0},
+	})
+
+	evts := drainEvents(t, s, 200*time.Millisecond)
+
+	// 1) The middle-step text "现在需要查找…" must appear exactly once
+	//    (the duplicate from default-branch re-emit is the bug).
+	const middleText = "现在需要查找\"事件中心服务\"的 appCode。让我在 pre 环境查询："
+	var middleCount, summaryCount, toolUseA, toolUseB int
+	var sawFinalResult bool
+	var resultEvt core.Event
+	for _, e := range evts {
+		switch e.Type {
+		case core.EventText:
+			if strings.Contains(e.Content, middleText) {
+				middleCount++
+			}
+			if strings.Contains(e.Content, "领域服务超时") {
+				summaryCount++
+			}
+		case core.EventToolUse:
+			if e.ToolName == "pre__ymscloud.resolve_app" {
+				toolUseA++
+			}
+			if e.ToolName == "pre__ymc.pod_log_grep" {
+				toolUseB++
+			}
+		case core.EventResult:
+			if e.Done {
+				sawFinalResult = true
+				resultEvt = e
+			}
+		}
+	}
+
+	if middleCount != 1 {
+		t.Errorf("middle-step text emitted %d times, want exactly 1 (default-branch re-emit bug): %+v", middleCount, evts)
+	}
+	if summaryCount < 1 {
+		t.Errorf("final summary text not emitted; got events=%+v", evts)
+	}
+	// 2) Both EventToolUse must be present — pre-flush path covered.
+	if toolUseA != 1 || toolUseB != 1 {
+		t.Errorf("expected one EventToolUse for A and B (got A=%d B=%d); engine pre-flush path not covered: %+v",
+			toolUseA, toolUseB, evts)
+	}
+	// 3) EventResult fires with correct token usage from agent_end.
+	if !sawFinalResult {
+		t.Fatalf("missing final EventResult{Done:true}: %+v", evts)
+	}
+	if resultEvt.InputTokens != 500 || resultEvt.OutputTokens != 80 {
+		t.Errorf("token usage lost on final result: %+v", resultEvt)
+	}
+	if s.busy.Load() {
+		t.Error("busy not cleared after final turn_end")
+	}
+}
+
 func TestHandleEvent_PromptFailureUsesErrorMessage(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.busy.Store(true)
