@@ -680,7 +680,13 @@ func TestHandleEvent_ProfileFooterTracksSetStatus(t *testing.T) {
 	}
 }
 
-func TestSessionProfileUpdateSurvivesAdapterRecycle(t *testing.T) {
+// A recycled session inherits the agent-level last-known profile snapshot
+// into s.currentProfile (in-session state continuity invariant) — but the
+// fresh subprocess has not yet confirmed its real connection, so the footer
+// must NOT be emitted based on inherited state alone. Auto-restore continues
+// to drive the actual reconnect via profileStore (see internal_turn.go:266),
+// and the real subprocess profile, once observed, will re-enable the footer.
+func TestSessionProfileUpdateInheritsCurrentProfileButDoesNotEmitFooter(t *testing.T) {
 	a := &Agent{}
 	a.setCurrentProfile("local")
 
@@ -704,11 +710,147 @@ func TestSessionProfileUpdateSurvivesAdapterRecycle(t *testing.T) {
 
 	evts := drainEvents(t, s2, 100*time.Millisecond)
 	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "profile:") {
+			t.Fatalf("inherited profile must not emit footer before current-subprocess observation; events=%+v", evts)
+		}
+	}
+	// Invariant: in-session state continuity — currentProfileName() still returns
+	// the inherited value for non-footer readers (status display, logs, etc.).
+	if got := s2.currentProfileName(); got != "yms-dev" {
+		t.Errorf("inherited currentProfileName lost: got %q, want yms-dev", got)
+	}
+}
+
+// Same setup as the previous test, but the fresh subprocess later reports an
+// env-switch to yms-dev — now profileObserved=true and the footer must fire.
+func TestSessionProfileFooterEmittedAfterCurrentSubprocessEnvSwitch(t *testing.T) {
+	a := &Agent{}
+	a.setCurrentProfile("local")
+
+	s1, _ := newTestSession(t, "default")
+	s1.profileUpdater = a.setCurrentProfile
+	s1.currentProfile.Store(a.currentProfileName())
+	s1.updateCurrentProfile("yms-dev")
+
+	s2, _ := newTestSession(t, "default")
+	s2.currentProfile.Store(a.currentProfileName())
+	s2.busy.Store(true)
+	s2.turnResultEmitted.Store(false)
+	// Current subprocess confirms the connection.
+	s2.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"customType": "yms-rca.env-switch",
+			"details":    map[string]any{"to": "yms-dev"},
+		},
+	})
+	s2.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "集群有 5 个节点。",
+		},
+	})
+	s2.handleEvent(map[string]any{"type": "turn_end"})
+
+	evts := drainEvents(t, s2, 100*time.Millisecond)
+	for _, e := range evts {
 		if e.Type == core.EventText && strings.Contains(e.Content, "profile: yms-dev") {
 			return
 		}
 	}
-	t.Fatalf("recycled adapter session did not inherit profile yms-dev; events=%+v", evts)
+	t.Fatalf("observed env-switch should re-enable profile footer; events=%+v", evts)
+}
+
+// Inherited 'pre' from agent snapshot — but the new subprocess has not yet
+// reported any profile. Footer must be omitted, not show 'pre'.
+func TestProfileFooterDoesNotUseInheritedProfileBeforeObservation(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.currentProfile.Store("pre") // inherited from agent snapshot
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "answer",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "profile:") {
+			t.Fatalf("footer must be omitted when profile not observed; events=%+v", evts)
+		}
+	}
+}
+
+// Inherited 'pre', then env-switch to 'yms-dev' is observed — footer reflects the
+// observed value, not the stale snapshot.
+func TestProfileFooterUsesObservedEnvSwitchOverInheritedProfile(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.currentProfile.Store("pre")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"customType": "yms-rca.env-switch",
+			"details":    map[string]any{"to": "yms-dev"},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "answer",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "profile: yms-dev") {
+			return
+		}
+	}
+	t.Fatalf("observed yms-dev should override inherited pre; events=%+v", evts)
+}
+
+// Inherited 'pre', then setStatus yms-env reports 'yms-dev' — footer reflects
+// observed value (setStatus is non-authoritative for the store but is valid for
+// footer display, since the footer is a current-subprocess truth, not a
+// persistence record).
+func TestProfileFooterUsesObservedSetStatusOverInheritedProfile(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.currentProfile.Store("pre")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.handleEvent(map[string]any{
+		"type":   "extension_ui_request",
+		"method": "setStatus",
+		"key":    "yms-env",
+		"text":   "env: yms-dev (172.20.52.234)",
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "answer",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "profile: yms-dev") {
+			return
+		}
+	}
+	t.Fatalf("observed setStatus should override inherited pre; events=%+v", evts)
 }
 
 func TestHandleEvent_AgentEnd_NoUsage(t *testing.T) {

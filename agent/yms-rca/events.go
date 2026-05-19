@@ -709,8 +709,23 @@ func (s *session) observeStatusProfile(profile string) {
 		return
 	}
 	s.currentProfile.Store(profile)
+	s.markProfileObserved("setStatus", profile)
 	if s.profileUpdater != nil {
 		s.profileUpdater(profile)
+	}
+}
+
+// markProfileObserved flips the footer gate and emits a low-noise debug log
+// so operators can correlate footer state with the event that authorised it.
+// Tokens are never logged; only the profile name (already a free-form yms-rca
+// identifier under user control) and session-routing fields.
+func (s *session) markProfileObserved(source, profile string) {
+	if s.profileObserved.CompareAndSwap(false, true) {
+		slog.Debug("yms-rca: profile observed",
+			"source", source,
+			"profile", profile,
+			"project", s.project,
+			"session_key", s.sessionKey)
 	}
 }
 
@@ -737,6 +752,7 @@ func (s *session) updateCurrentProfile(profile string) {
 		return
 	}
 	s.currentProfile.Store(profile)
+	s.markProfileObserved("env-switch", profile)
 	if s.profileUpdater != nil {
 		s.profileUpdater(profile)
 	}
@@ -763,6 +779,14 @@ func (s *session) currentProfileName() string {
 
 func (s *session) emitProfileFooter() {
 	if !s.turnTextEmitted.Load() {
+		return
+	}
+	// Footer must reflect the CURRENT subprocess's confirmed connection —
+	// not the agent-level snapshot inherited from a recycled session, which
+	// can be stale relative to a fresh subprocess that just spawned in
+	// "local" state. profileObserved is set by env-switch / setStatus
+	// yms-env from this subprocess.
+	if !s.profileObserved.Load() {
 		return
 	}
 	profile := s.currentProfileName()

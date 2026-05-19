@@ -229,14 +229,19 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 // resolveResumeFile follows §B6 strictly — no fallback between branches.
+// When sessionID is supplied and no explicit sessionDir is set, the lookup
+// walks sessionDirCandidates() in order (new yms-rca path first, then the
+// legacy path) so an upgraded daemon can still resume sessions written by
+// the previous on-disk layout.
 func (a *Agent) resolveResumeFile(sessionID string) (string, error) {
 	if sessionID != "" && sessionID != core.ContinueSession {
-		sessDir := a.effectiveSessionDir()
-		path := findSessionFile(sessDir, sessionID)
-		if path == "" {
-			return "", fmt.Errorf("yms-rca: session %q not found in %s", sessionID, sessDir)
+		dirs := a.sessionDirCandidates()
+		for _, d := range dirs {
+			if path := findSessionFile(d, sessionID); path != "" {
+				return path, nil
+			}
 		}
-		return path, nil
+		return "", fmt.Errorf("yms-rca: session %q not found in %v", sessionID, dirs)
 	}
 	if a.sessionFile != "" {
 		if _, err := os.Stat(a.sessionFile); err != nil {
@@ -247,18 +252,36 @@ func (a *Agent) resolveResumeFile(sessionID string) (string, error) {
 	return "", nil
 }
 
-// effectiveSessionDir returns the directory to scan for session files.
-func (a *Agent) effectiveSessionDir() string {
+// sessionDirCandidates returns the ordered list of directories to search
+// for yms-rca session files. When session_dir is explicitly configured,
+// only that one directory is returned (and no implicit fallback occurs).
+// Otherwise the new yms-rca default (~/.yms-rca/agent/sessions) is tried
+// first, with the historical adapter default (~/.yms-rca/sessions) kept
+// as a fallback so existing user sessions from before the upstream
+// directory change remain discoverable.
+func (a *Agent) sessionDirCandidates() []string {
 	if a.sessionDir != "" {
-		return a.sessionDir
+		return []string{a.sessionDir}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		return nil
+	}
+	return []string{
+		filepath.Join(home, ".yms-rca", "agent", "sessions"),
+		filepath.Join(home, ".yms-rca", "sessions"),
+	}
+}
+
+// effectiveSessionDir returns the first candidate directory — used for
+// error/log display and any place that needs a single path (it does NOT
+// govern session lookup; callers walk sessionDirCandidates() instead).
+func (a *Agent) effectiveSessionDir() string {
+	dirs := a.sessionDirCandidates()
+	if len(dirs) == 0 {
 		return ""
 	}
-	// yms-rca default — under ~/.yms-rca/sessions (best-effort; if upstream
-	// uses a different layout, the user can set session_dir explicitly).
-	return filepath.Join(home, ".yms-rca", "sessions")
+	return dirs[0]
 }
 
 // ── core.AgentDoctorInfo ───────────────────────────────────

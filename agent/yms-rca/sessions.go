@@ -14,41 +14,53 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// ListSessions implements core.Agent. It scans the session directory for
-// `.jsonl` files and reports each as one AgentSessionInfo.
+// ListSessions implements core.Agent. It scans every candidate session
+// directory (see sessionDirCandidates) for `.jsonl` files and reports each
+// as one AgentSessionInfo. When the same session ID appears in multiple
+// candidate dirs, the first dir in candidate order wins — matching the
+// "new path takes precedence, legacy is fallback" rule used by
+// DeleteSession / GetSessionHistory / resolveResumeFile.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	sessDir := a.effectiveSessionDir()
-	if sessDir == "" {
+	dirs := a.sessionDirCandidates()
+	if len(dirs) == 0 {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(sessDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("yms-rca: read session dir: %w", err)
-	}
 
+	seen := map[string]struct{}{}
 	var sessions []core.AgentSessionInfo
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		info, err := entry.Info()
+
+	for _, sessDir := range dirs {
+		entries, err := os.ReadDir(sessDir)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("yms-rca: read session dir %s: %w", sessDir, err)
 		}
-		sessionID, summary, msgCount := scanSession(filepath.Join(sessDir, name))
-		if sessionID == "" {
-			continue
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			finfo, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			sessionID, summary, msgCount := scanSession(filepath.Join(sessDir, name))
+			if sessionID == "" {
+				continue
+			}
+			if _, ok := seen[sessionID]; ok {
+				continue
+			}
+			seen[sessionID] = struct{}{}
+			sessions = append(sessions, core.AgentSessionInfo{
+				ID:           sessionID,
+				Summary:      summary,
+				MessageCount: msgCount,
+				ModifiedAt:   finfo.ModTime(),
+			})
 		}
-		sessions = append(sessions, core.AgentSessionInfo{
-			ID:           sessionID,
-			Summary:      summary,
-			MessageCount: msgCount,
-			ModifiedAt:   info.ModTime(),
-		})
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -59,28 +71,26 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 
 // DeleteSession implements core.SessionDeleter.
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	sessDir := a.effectiveSessionDir()
-	if sessDir == "" {
+	dirs := a.sessionDirCandidates()
+	if len(dirs) == 0 {
 		return fmt.Errorf("yms-rca: cannot determine session directory")
 	}
-	path := findSessionFile(sessDir, sessionID)
-	if path == "" {
-		return fmt.Errorf("yms-rca: session %q not found", sessionID)
+	for _, d := range dirs {
+		if path := findSessionFile(d, sessionID); path != "" {
+			return os.Remove(path)
+		}
 	}
-	return os.Remove(path)
+	return fmt.Errorf("yms-rca: session %q not found in %v", sessionID, dirs)
 }
 
 // GetSessionHistory implements core.HistoryProvider.
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	sessDir := a.effectiveSessionDir()
-	if sessDir == "" {
-		return nil, nil
+	for _, d := range a.sessionDirCandidates() {
+		if sessFile := findSessionFile(d, sessionID); sessFile != "" {
+			return readSessionHistory(sessFile, limit)
+		}
 	}
-	sessFile := findSessionFile(sessDir, sessionID)
-	if sessFile == "" {
-		return nil, nil
-	}
-	return readSessionHistory(sessFile, limit)
+	return nil, nil
 }
 
 // findSessionFile locates the .jsonl file whose name encodes sessionID.

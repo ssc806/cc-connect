@@ -95,6 +95,10 @@ func TestE2E_ClusterNodeQuestionWaitsForPostToolSummary(t *testing.T) {
 	session, enc := newTestSession(t, "default")
 	session.sessionID.Store("yms-e2e-session")
 	session.currentProfile.Store("new5")
+	// Simulate the current subprocess having already confirmed its connection
+	// (env-switch / setStatus yms-env earlier in this notional session); the
+	// footer gate requires an observation before rendering.
+	session.profileObserved.Store(true)
 	platform := &e2ePlatform{}
 	engine := core.NewEngine("yms-rca-e2e", &e2eAgent{session: session}, []core.Platform{platform}, "", core.LangChinese)
 	defer engine.Stop()

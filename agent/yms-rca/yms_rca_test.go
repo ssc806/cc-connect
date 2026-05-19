@@ -487,3 +487,124 @@ func TestResolveResumeFile_SessionIDNotFound_NoFallback(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// ── sessionDirCandidates / default-dir fallback ────────────
+//
+// Real yms-rca writes sessions to ~/.yms-rca/agent/sessions, but the older
+// adapter default was ~/.yms-rca/sessions. When session_dir is not
+// explicitly configured, all session read paths must check both — first
+// the new default, then the legacy location — so existing user sessions
+// don't silently disappear after the adapter upgrade.
+
+func withFakeHome(t *testing.T) (string, string, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	agentDir := filepath.Join(home, ".yms-rca", "agent", "sessions")
+	legacyDir := filepath.Join(home, ".yms-rca", "sessions")
+	return home, agentDir, legacyDir
+}
+
+func TestResolveResumeFileUsesAgentSessionsByDefault(t *testing.T) {
+	_, agentDir, _ := withFakeHome(t)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(agentDir, "20260101_my-uuid.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{}
+	got, err := a.resolveResumeFile("my-uuid")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != path {
+		t.Errorf("got %q, want %q", got, path)
+	}
+}
+
+func TestResolveResumeFileFallsBackToLegacyWhenAgentDirMissesSession(t *testing.T) {
+	_, agentDir, legacyDir := withFakeHome(t)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Different session in agent dir; target only in legacy.
+	other := filepath.Join(agentDir, "20260101_other.jsonl")
+	if err := os.WriteFile(other, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(legacyDir, "20260101_legacy-uuid.jsonl")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{}
+	got, err := a.resolveResumeFile("legacy-uuid")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != target {
+		t.Errorf("got %q, want %q (must fall back to legacy)", got, target)
+	}
+}
+
+func TestResolveResumeFileFallsBackToLegacyWhenAgentDirDoesNotExist(t *testing.T) {
+	_, _, legacyDir := withFakeHome(t)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(legacyDir, "20260101_only-legacy.jsonl")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{}
+	got, err := a.resolveResumeFile("only-legacy")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != target {
+		t.Errorf("got %q, want %q", got, target)
+	}
+}
+
+func TestResolveResumeFileRespectsExplicitSessionDirWithoutFallback(t *testing.T) {
+	_, _, legacyDir := withFakeHome(t)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy has the session, but explicit sessionDir is elsewhere; must NOT fall back.
+	if err := os.WriteFile(filepath.Join(legacyDir, "20260101_hit.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	explicit := t.TempDir()
+	a := &Agent{sessionDir: explicit}
+	_, err := a.resolveResumeFile("hit")
+	if err == nil {
+		t.Fatal("expected error: must not fall back to legacy when sessionDir is explicit")
+	}
+}
+
+func TestResolveResumeFileErrorListsBothCandidatesWhenNotFound(t *testing.T) {
+	home, agentDir, legacyDir := withFakeHome(t)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{}
+	_, err := a.resolveResumeFile("missing")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, filepath.Join(home, ".yms-rca", "agent", "sessions")) {
+		t.Errorf("error should mention new candidate dir; got %q", msg)
+	}
+	if !strings.Contains(msg, filepath.Join(home, ".yms-rca", "sessions")) {
+		t.Errorf("error should mention legacy candidate dir; got %q", msg)
+	}
+}
