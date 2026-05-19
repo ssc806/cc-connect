@@ -271,6 +271,51 @@ func TestListSessionsRespectsExplicitSessionDirOnly(t *testing.T) {
 	}
 }
 
+// When the same session ID appears in both the new and legacy dirs,
+// ListSessions must return the entry from the first candidate dir (new path)
+// — matching the candidate-order rule used by DeleteSession /
+// GetSessionHistory / resolveResumeFile, even if the legacy file has a newer
+// mtime. Prevents /list showing a different file than /switch or /delete
+// would act on.
+func TestListSessionsDuplicateIDPrefersFirstCandidateDir(t *testing.T) {
+	_, agentDir, legacyDir := withFakeHome(t)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentFile := filepath.Join(agentDir, "20260101_dup.jsonl")
+	legacyFile := filepath.Join(legacyDir, "20260102_dup.jsonl")
+	writeJSONL(t, agentFile,
+		`{"type":"session","id":"dup"}`,
+		`{"type":"message","message":{"role":"user","content":[{"text":"from-agent"}]}}`,
+	)
+	writeJSONL(t, legacyFile,
+		`{"type":"session","id":"dup"}`,
+		`{"type":"message","message":{"role":"user","content":[{"text":"from-legacy"}]}}`,
+	)
+	// Legacy file is newer on disk, but the candidate-order rule should
+	// still prefer the agent-dir entry.
+	future := time.Now().Add(1 * time.Hour)
+	if err := os.Chtimes(legacyFile, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{}
+	got, err := a.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 entry for duplicate id, got %d: %+v", len(got), got)
+	}
+	if got[0].Summary != "from-agent" {
+		t.Errorf("ListSessions should report the agent-dir file (matches resolveResumeFile/Delete/History); got summary %q", got[0].Summary)
+	}
+}
+
 func TestDeleteSessionFindsInLegacyWhenAgentDirMissesIt(t *testing.T) {
 	_, agentDir, legacyDir := withFakeHome(t)
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {

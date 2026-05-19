@@ -17,18 +17,16 @@ import (
 // ListSessions implements core.Agent. It scans every candidate session
 // directory (see sessionDirCandidates) for `.jsonl` files and reports each
 // as one AgentSessionInfo. When the same session ID appears in multiple
-// candidate dirs, the newer mtime wins.
+// candidate dirs, the first dir in candidate order wins — matching the
+// "new path takes precedence, legacy is fallback" rule used by
+// DeleteSession / GetSessionHistory / resolveResumeFile.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	dirs := a.sessionDirCandidates()
 	if len(dirs) == 0 {
 		return nil, nil
 	}
 
-	type indexed struct {
-		info  core.AgentSessionInfo
-		index int
-	}
-	byID := map[string]indexed{}
+	seen := map[string]struct{}{}
 	var sessions []core.AgentSessionInfo
 
 	for _, sessDir := range dirs {
@@ -52,21 +50,16 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 			if sessionID == "" {
 				continue
 			}
-			candidate := core.AgentSessionInfo{
+			if _, ok := seen[sessionID]; ok {
+				continue
+			}
+			seen[sessionID] = struct{}{}
+			sessions = append(sessions, core.AgentSessionInfo{
 				ID:           sessionID,
 				Summary:      summary,
 				MessageCount: msgCount,
 				ModifiedAt:   finfo.ModTime(),
-			}
-			if prev, ok := byID[sessionID]; ok {
-				if candidate.ModifiedAt.After(prev.info.ModifiedAt) {
-					sessions[prev.index] = candidate
-					byID[sessionID] = indexed{info: candidate, index: prev.index}
-				}
-				continue
-			}
-			byID[sessionID] = indexed{info: candidate, index: len(sessions)}
-			sessions = append(sessions, candidate)
+			})
 		}
 	}
 
