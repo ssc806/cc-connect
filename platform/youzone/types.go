@@ -15,6 +15,8 @@ const (
 	defaultAccessTokenHelperTimeout = 10 * time.Second
 	defaultAccessTokenTTL           = 14*time.Hour + 30*time.Minute
 	defaultAccessTokenRefreshBefore = 30 * time.Minute
+
+	accessTokenSourceChrome = "chrome"
 )
 
 type config struct {
@@ -40,6 +42,7 @@ type config struct {
 	// is configured. The first element is always the executable; the rest are
 	// literal arguments — the helper is never run through a shell.
 	accessTokenHelper        []string
+	accessTokenSource        string
 	accessTokenHelperTimeout time.Duration
 	accessTokenTTL           time.Duration // fallback expiry when the helper returns no expires_in/expires_at
 	accessTokenRefreshBefore time.Duration // how long before expiry a proactive refresh kicks in

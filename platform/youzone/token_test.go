@@ -41,6 +41,12 @@ func newTestTokenManager(clk *fakeClock, helper []string, static string) *tokenM
 	return tm
 }
 
+func newTestTokenManagerWithSource(clk *fakeClock, source string, static string) *tokenManager {
+	tm := newTestTokenManager(clk, nil, static)
+	tm.accessTokenSource = source
+	return tm
+}
+
 // stubHelper returns a runHelper that always yields the given stdout and counts
 // invocations.
 func stubHelper(stdout string, calls *int32) helperRunner {
@@ -174,6 +180,46 @@ func TestTokenManagerLazyLoadsViaHelper(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("helper invoked %d times, want 1", calls)
+	}
+}
+
+func TestTokenManagerLazyLoadsViaChromeSource(t *testing.T) {
+	clk := newFakeClock()
+	tm := newTestTokenManagerWithSource(clk, "chrome", "")
+	var calls int32
+	tm.runSource = func(_ context.Context, source string) (helperOutput, error) {
+		atomic.AddInt32(&calls, 1)
+		if source != "chrome" {
+			t.Fatalf("source = %q, want chrome", source)
+		}
+		return helperOutput{token: "chrome-token", expiresAt: clk.now().Add(time.Hour)}, nil
+	}
+
+	tok, err := tm.Token(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Token() error = %v", err)
+	}
+	if tok != "chrome-token" {
+		t.Errorf("Token() = %q, want chrome-token", tok)
+	}
+	if calls != 1 {
+		t.Errorf("source invoked %d times, want 1", calls)
+	}
+}
+
+func TestTokenManagerChromeSourceForcedRefreshFailureDoesNotFallback(t *testing.T) {
+	clk := newFakeClock()
+	tm := newTestTokenManagerWithSource(clk, "chrome", "static-token")
+	tm.runSource = func(_ context.Context, _ string) (helperOutput, error) {
+		return helperOutput{}, errors.New("Chrome has no yht_access_token")
+	}
+
+	tok, err := tm.Token(context.Background(), true)
+	if err == nil {
+		t.Fatal("forced Token() error = nil, want failure")
+	}
+	if tok == "static-token" {
+		t.Fatal("forced refresh fell back to the server-rejected static token")
 	}
 }
 

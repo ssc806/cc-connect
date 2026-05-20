@@ -58,6 +58,46 @@ func TestParseConfigHelperStringFormAllowsEmptyAccessToken(t *testing.T) {
 	}
 }
 
+func TestParseConfigChromeTokenSourceAllowsEmptyAccessToken(t *testing.T) {
+	cfg, err := parseConfig(map[string]any{
+		"robot_id":            "robot",
+		"tenant_id":           "tenant",
+		"access_token_source": "chrome",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if cfg.accessTokenSource != "chrome" {
+		t.Fatalf("accessTokenSource = %q, want chrome", cfg.accessTokenSource)
+	}
+	if cfg.accessToken != "" {
+		t.Fatalf("accessToken = %q, want empty when chrome source configured", cfg.accessToken)
+	}
+}
+
+func TestParseConfigRejectsUnknownTokenSource(t *testing.T) {
+	_, err := parseConfig(map[string]any{
+		"robot_id":            "robot",
+		"tenant_id":           "tenant",
+		"access_token_source": "firefox",
+	})
+	if err == nil {
+		t.Fatal("parseConfig() error = nil, want unknown access_token_source rejection")
+	}
+}
+
+func TestParseConfigRejectsHelperAndTokenSourceTogether(t *testing.T) {
+	_, err := parseConfig(map[string]any{
+		"robot_id":            "robot",
+		"tenant_id":           "tenant",
+		"access_token_helper": "/opt/cc-connect/get-token",
+		"access_token_source": "chrome",
+	})
+	if err == nil {
+		t.Fatal("parseConfig() error = nil, want helper/source conflict rejection")
+	}
+}
+
 func TestParseConfigHelperArrayForm(t *testing.T) {
 	cfg, err := parseConfig(map[string]any{
 		"robot_id":  "robot",

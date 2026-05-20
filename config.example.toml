@@ -1056,7 +1056,8 @@ app_secret = "your-feishu-app-secret"
 # base_url = "https://c2.yonyoucloud.com"     # optional; YOUZONE production default / 可选，YOUZONE 生产默认值
 # api_prefix = "/yonbip-ec-link"             # optional / 可选
 # robot_id = "your-youzone-robot-id"
-# access_token = "${YOUZONE_ACCESS_TOKEN}"   # BIP/YouZone yht_access_token
+# access_token = "${YOUZONE_ACCESS_TOKEN}"   # Optional static BIP/YouZone yht_access_token / 可选静态 token
+# access_token_source = "chrome"             # Recommended on macOS: read a fresh token from local Chrome / macOS 推荐：从本机 Chrome 读取新 token
 # tenant_id = "${YOUZONE_TENANT_ID}"
 # allow_from = "*"                           # YOUZONE sender IDs, e.g. "user-1.esn.upesn"; "*" = all
 # websocket_protocols = "xmpp"
@@ -1068,26 +1069,35 @@ app_secret = "your-feishu-app-secret"
 # # auto_create_robot = false
 # # robot_explain = "cc-connect"
 #
-# ── access_token_helper: hot token refresh / 运行中热刷新 token ───────────────
+# ── Runtime token refresh / 运行中热刷新 token ────────────────────────────────
 # A static access_token is frozen in memory at startup: once the yht_access_token
 # expires (or you re-login in Chrome) a static-token daemon keeps sending the dead
 # token and YouZone answers getWss with the CAS login page until cc-connect is
-# restarted. For a long-running daemon, prefer access_token_helper — an external
-# command cc-connect runs on demand to fetch a fresh token. access_token then
-# becomes an optional startup fallback only.
+# restarted. For a long-running daemon, prefer access_token_source = "chrome" on
+# macOS: cc-connect reads the current yht_access_token directly from local Chrome
+# via the macOS Keychain, so users do not need to provide a helper script path.
+# access_token then becomes an optional startup fallback only.
 # 静态 access_token 在启动时就固定在内存里：token 过期或你在 Chrome 重新登录后，
 # 只用静态 token 的 daemon 会一直发失效 token，必须重启才能恢复。长期运行的 daemon
-# 建议改用 access_token_helper —— cc-connect 按需运行的外部命令，用于取最新 token；
+# 在 macOS 上建议使用 access_token_source = "chrome"：cc-connect 会通过 macOS
+# Keychain 直接从本机 Chrome 读取当前 yht_access_token，用户不需要再提供脚本路径；
 # 此时 access_token 仅作为可选的启动兜底。
 #
+# Built-in source:
+# access_token_source = "chrome"             # macOS + Google Chrome only; explicit opt-in
+#
+# Advanced deployments can still use access_token_helper instead of the built-in
+# source. access_token_helper and access_token_source are mutually exclusive.
 # The helper is run directly via exec — never through a shell. The string form
 # must be a single executable path with NO spaces; to pass arguments, use the
 # array (argv) form. It prints the token to stdout, as plain text or JSON:
 #   plain: <yht_access_token>
 #   json:  {"access_token":"<token>","expires_in":54000}
 #          {"access_token":"<token>","expires_at":"2026-05-20T23:10:00+08:00"}
-# helper 永远经 exec 直接执行，绝不走 shell。字符串形式必须是不含空格的单个可执行
-# 文件路径；要传参数请用数组(argv)形式。helper 把 token 打到 stdout（纯文本或 JSON）。
+# 高级部署仍可使用 access_token_helper 替代内置 source。access_token_helper 和
+# access_token_source 互斥。helper 永远经 exec 直接执行，绝不走 shell。字符串形式
+# 必须是不含空格的单个可执行文件路径；要传参数请用数组(argv)形式。helper 把 token
+# 打到 stdout（纯文本或 JSON）。
 #
 # access_token_helper = "/path/to/get-youzone-token.mjs"
 # # or the argv form when the command needs arguments:

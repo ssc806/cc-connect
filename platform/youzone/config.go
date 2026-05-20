@@ -81,11 +81,18 @@ func parseConfig(opts map[string]any) (config, error) {
 		return cfg, fmt.Errorf("youzone: access_token_helper: %w", err)
 	}
 	cfg.accessTokenHelper = helper
+	cfg.accessTokenSource = strings.ToLower(optString(opts, "access_token_source"))
+	if cfg.accessTokenSource != "" && cfg.accessTokenSource != accessTokenSourceChrome {
+		return cfg, fmt.Errorf("youzone: access_token_source must be %q", accessTokenSourceChrome)
+	}
+	if len(cfg.accessTokenHelper) > 0 && cfg.accessTokenSource != "" {
+		return cfg, fmt.Errorf("youzone: access_token_helper and access_token_source are mutually exclusive")
+	}
 	if err := parseHelperDurations(opts, &cfg); err != nil {
 		return cfg, err
 	}
-	if len(cfg.accessTokenHelper) == 0 && cfg.accessToken == "" {
-		return cfg, fmt.Errorf("youzone: access_token is required unless access_token_helper is configured")
+	if len(cfg.accessTokenHelper) == 0 && cfg.accessTokenSource == "" && cfg.accessToken == "" {
+		return cfg, fmt.Errorf("youzone: access_token is required unless access_token_helper or access_token_source is configured")
 	}
 	if cfg.tenantID == "" {
 		return cfg, fmt.Errorf("youzone: tenant_id is required")

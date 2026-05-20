@@ -20,6 +20,7 @@ type tokenSource string
 const (
 	tokenSourceStatic tokenSource = "static"
 	tokenSourceHelper tokenSource = "helper"
+	tokenSourceChrome tokenSource = "chrome"
 )
 
 // refreshReason names why a refresh ran, for log fields only.
@@ -44,23 +45,28 @@ const helperStderrCap = 256
 // tests can substitute a fake instead of spawning real processes.
 type helperRunner func(ctx context.Context, argv []string, timeout time.Duration) (stdout, stderr []byte, err error)
 
+// tokenSourceRunner executes a built-in access-token source.
+type tokenSourceRunner func(ctx context.Context, source string) (helperOutput, error)
+
 // tokenManager owns the YouZone yht_access_token: it serves the cached token,
-// refreshes it through an external helper command when configured, and keeps
-// the previous token around purely so it can still be redacted out of logs
-// after a refresh.
+// refreshes it through either an external helper or a built-in token source
+// when configured, and keeps the previous token around purely so it can still
+// be redacted out of logs after a refresh.
 //
 // Concurrency: mu is held for the entire refresh, including the helper exec.
 // That guarantees at most one helper process at a time; concurrent callers
 // block on mu and, once it is released, re-check the cache — so a burst of
 // requests collapses into a single helper invocation.
 type tokenManager struct {
-	helper        []string // argv; empty => static-only, no refresh
-	helperTimeout time.Duration
-	ttl           time.Duration // expiry fallback when the helper returns none
-	refreshBefore time.Duration // proactive-refresh lead time before expiry
+	helper            []string // argv; empty => static-only, no refresh
+	accessTokenSource string
+	helperTimeout     time.Duration
+	ttl               time.Duration // expiry fallback when the helper returns none
+	refreshBefore     time.Duration // proactive-refresh lead time before expiry
 
-	runHelper helperRunner     // overridable in tests
-	now       func() time.Time // overridable in tests
+	runHelper helperRunner      // overridable in tests
+	runSource tokenSourceRunner // overridable in tests
+	now       func() time.Time  // overridable in tests
 
 	mu             sync.Mutex
 	token          string
@@ -77,12 +83,14 @@ type tokenManager struct {
 // refresh window when a helper is configured.
 func newTokenManager(cfg config) *tokenManager {
 	tm := &tokenManager{
-		helper:        cfg.accessTokenHelper,
-		helperTimeout: cfg.accessTokenHelperTimeout,
-		ttl:           cfg.accessTokenTTL,
-		refreshBefore: cfg.accessTokenRefreshBefore,
-		runHelper:     runHelperProcess,
-		now:           time.Now,
+		helper:            cfg.accessTokenHelper,
+		accessTokenSource: cfg.accessTokenSource,
+		helperTimeout:     cfg.accessTokenHelperTimeout,
+		ttl:               cfg.accessTokenTTL,
+		refreshBefore:     cfg.accessTokenRefreshBefore,
+		runHelper:         runHelperProcess,
+		runSource:         runBuiltInTokenSource,
+		now:               time.Now,
 	}
 	if cfg.accessToken != "" {
 		tm.token = cfg.accessToken
@@ -110,7 +118,7 @@ func (tm *tokenManager) Token(ctx context.Context, force bool) (string, error) {
 		if tm.token != "" && now.Before(tm.refreshDeadlineLocked()) {
 			return tm.token, nil
 		}
-		if len(tm.helper) == 0 {
+		if !tm.canRefreshLocked() {
 			// Static-only manager: a single token, never refreshed — identical
 			// to cc-connect's pre-helper behavior.
 			if tm.token != "" {
@@ -129,10 +137,10 @@ func (tm *tokenManager) Token(ctx context.Context, force bool) (string, error) {
 		}
 	}
 
-	if len(tm.helper) == 0 {
+	if !tm.canRefreshLocked() {
 		// force=true with nothing to refresh with. Reporting the failure (rather
 		// than returning the rejected token) lets the caller stop retrying.
-		return "", fmt.Errorf("youzone: access token rejected and no access_token_helper is configured to refresh it")
+		return "", fmt.Errorf("youzone: access token rejected and no access_token_helper or access_token_source is configured to refresh it")
 	}
 
 	return tm.refreshLocked(ctx, tm.classifyReasonLocked(force))
@@ -142,6 +150,10 @@ func (tm *tokenManager) Token(ctx context.Context, force bool) (string, error) {
 // "expiring" and a proactive refresh should run.
 func (tm *tokenManager) refreshDeadlineLocked() time.Time {
 	return tm.expiresAt.Add(-tm.refreshBefore)
+}
+
+func (tm *tokenManager) canRefreshLocked() bool {
+	return len(tm.helper) > 0 || tm.accessTokenSource != ""
 }
 
 func (tm *tokenManager) classifyReasonLocked(force bool) refreshReason {
@@ -160,12 +172,8 @@ func (tm *tokenManager) refreshLocked(ctx context.Context, reason refreshReason)
 	start := tm.now()
 	slog.Info("youzone: access token refresh started", "reason", string(reason))
 
-	stdout, stderr, err := tm.runHelper(ctx, tm.helper, tm.helperTimeout)
+	out, err := tm.runRefreshProviderLocked(ctx)
 	elapsed := tm.now().Sub(start)
-	if err != nil {
-		return tm.refreshFailedLocked(reason, elapsed, helperError(err, stderr))
-	}
-	out, err := parseHelperOutput(stdout, tm.now(), tm.ttl)
 	if err != nil {
 		return tm.refreshFailedLocked(reason, elapsed, err)
 	}
@@ -173,17 +181,52 @@ func (tm *tokenManager) refreshLocked(ctx context.Context, reason refreshReason)
 	tm.prevToken = tm.token
 	tm.token = out.token
 	tm.expiresAt = out.expiresAt
-	tm.source = tokenSourceHelper
+	tm.source = tm.refreshSourceLocked()
 	tm.lastRefreshErr = nil
 	tm.lastRefreshAt = tm.now()
 
 	slog.Info("youzone: access token refresh succeeded",
 		"reason", string(reason),
-		"source", string(tokenSourceHelper),
+		"source", string(tm.source),
 		"elapsed", elapsed,
 		"expires_in", out.expiresAt.Sub(tm.now()).Round(time.Second),
 	)
 	return tm.token, nil
+}
+
+func (tm *tokenManager) refreshSourceLocked() tokenSource {
+	if len(tm.helper) > 0 {
+		return tokenSourceHelper
+	}
+	if tm.accessTokenSource == accessTokenSourceChrome {
+		return tokenSourceChrome
+	}
+	return tokenSource(tm.accessTokenSource)
+}
+
+func (tm *tokenManager) runRefreshProviderLocked(ctx context.Context) (helperOutput, error) {
+	if len(tm.helper) > 0 {
+		stdout, stderr, err := tm.runHelper(ctx, tm.helper, tm.helperTimeout)
+		if err != nil {
+			return helperOutput{}, helperError(err, stderr)
+		}
+		out, err := parseHelperOutput(stdout, tm.now(), tm.ttl)
+		if err != nil {
+			return helperOutput{}, err
+		}
+		return out, nil
+	}
+	out, err := tm.runSource(ctx, tm.accessTokenSource)
+	if err != nil {
+		return helperOutput{}, fmt.Errorf("%s token source: %w", tm.accessTokenSource, err)
+	}
+	if out.token == "" {
+		return helperOutput{}, fmt.Errorf("%s token source produced empty token", tm.accessTokenSource)
+	}
+	if out.expiresAt.IsZero() {
+		out.expiresAt = tm.now().Add(tm.ttl)
+	}
+	return out, nil
 }
 
 // refreshFailedLocked records a helper failure and decides whether the caller
