@@ -54,6 +54,7 @@ config.*.toml
 package-lock.json
 node_modules/
 .vite/
+*.tsbuildinfo
 
 # ============================================================================
 # Build & distribution
@@ -71,6 +72,8 @@ web/dist/*
 # ============================================================================
 test/
 scripts/
+!scripts/
+!scripts/e2e-youzone-codex.sh
 tmp/
 temp/
 *.tmp
