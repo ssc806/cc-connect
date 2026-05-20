@@ -43,6 +43,7 @@ type config struct {
 	// literal arguments — the helper is never run through a shell.
 	accessTokenHelper        []string
 	accessTokenSource        string
+	chromeProfile            string // Chrome profile dir for access_token_source=chrome; "" => "Default"
 	accessTokenHelperTimeout time.Duration
 	accessTokenTTL           time.Duration // fallback expiry when the helper returns no expires_in/expires_at
 	accessTokenRefreshBefore time.Duration // how long before expiry a proactive refresh kicks in

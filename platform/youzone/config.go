@@ -88,6 +88,10 @@ func parseConfig(opts map[string]any) (config, error) {
 	if len(cfg.accessTokenHelper) > 0 && cfg.accessTokenSource != "" {
 		return cfg, fmt.Errorf("youzone: access_token_helper and access_token_source are mutually exclusive")
 	}
+	cfg.chromeProfile = optString(opts, "chrome_profile")
+	if cfg.chromeProfile != "" && cfg.accessTokenSource != accessTokenSourceChrome {
+		return cfg, fmt.Errorf("youzone: chrome_profile only applies when access_token_source = %q", accessTokenSourceChrome)
+	}
 	if err := parseHelperDurations(opts, &cfg); err != nil {
 		return cfg, err
 	}

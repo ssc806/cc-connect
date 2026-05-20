@@ -8,7 +8,7 @@ import (
 	"runtime"
 )
 
-func runBuiltInTokenSource(_ context.Context, source string) (helperOutput, error) {
+func runBuiltInTokenSource(_ context.Context, source string, _ tokenSourceConfig) (helperOutput, error) {
 	switch source {
 	case accessTokenSourceChrome:
 		return helperOutput{}, fmt.Errorf("built-in Chrome token source is only supported on macOS, not %s", runtime.GOOS)

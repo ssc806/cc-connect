@@ -11,10 +11,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 
@@ -22,21 +24,20 @@ import (
 )
 
 const (
-	chromeCookieProfile = "Default"
-	chromeSafeStorage   = "Chrome Safe Storage"
-	chromeCookieName    = "yht_access_token"
+	defaultChromeProfile = "Default"
+	chromeSafeStorage    = "Chrome Safe Storage"
+	chromeCookieName     = "yht_access_token"
 )
 
 type chromeCookie struct {
-	name   string
 	value  string
-	domain string
+	domain string // Chrome host_key, e.g. ".yonyoucloud.com" or "c2.yonyoucloud.com"
 }
 
-func runBuiltInTokenSource(ctx context.Context, source string) (helperOutput, error) {
+func runBuiltInTokenSource(ctx context.Context, source string, cfg tokenSourceConfig) (helperOutput, error) {
 	switch source {
 	case accessTokenSourceChrome:
-		token, err := extractChromeYHTAccessToken(ctx)
+		token, err := extractChromeYHTAccessToken(ctx, cfg)
 		if err != nil {
 			return helperOutput{}, err
 		}
@@ -46,19 +47,65 @@ func runBuiltInTokenSource(ctx context.Context, source string) (helperOutput, er
 	}
 }
 
-func extractChromeYHTAccessToken(ctx context.Context) (string, error) {
-	cookies, err := extractChromeCookies(ctx, chromeCookieProfile)
+// extractChromeYHTAccessToken returns the freshest unexpired yht_access_token
+// cookie Chrome holds for the configured base_url host. Scoping to that host
+// keeps a browser logged in to several Yonyou environments from silently
+// handing back a token minted for a different one.
+func extractChromeYHTAccessToken(ctx context.Context, cfg tokenSourceConfig) (string, error) {
+	host, err := tokenSourceHost(cfg.baseURL)
 	if err != nil {
 		return "", err
 	}
+	profile := cfg.chromeProfile
+	if profile == "" {
+		profile = defaultChromeProfile
+	}
+	cookies, err := extractChromeCookies(ctx, profile)
+	if err != nil {
+		return "", err
+	}
+	// cookies arrives ordered freshest-first; the first host match wins.
 	for _, c := range cookies {
-		if c.name == chromeCookieName && len(c.value) >= 10 {
+		if len(c.value) >= 10 && cookieHostMatches(c.domain, host) {
 			return c.value, nil
 		}
 	}
-	return "", fmt.Errorf("Chrome has no valid %s cookie; log in to ymscloud.yonyoucloud.com in Chrome", chromeCookieName)
+	return "", fmt.Errorf("Chrome profile %q has no valid %s cookie for %s; log in to that host in Chrome (set chrome_profile if you use a non-default profile)",
+		profile, chromeCookieName, host)
 }
 
+// tokenSourceHost extracts the lower-cased hostname from the configured
+// base_url so cookie lookups can be scoped to it.
+func tokenSourceHost(baseURL string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("Chrome token source: cannot derive host from base_url %q", baseURL)
+	}
+	return strings.ToLower(u.Hostname()), nil
+}
+
+// cookieHostMatches reports whether a cookie stored under hostKey applies to
+// host. It accepts an exact match and a parent-domain match — Chrome stores a
+// domain cookie's host_key as ".example.com", which covers c2.example.com.
+func cookieHostMatches(hostKey, host string) bool {
+	hostKey = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hostKey), "."))
+	host = strings.ToLower(strings.TrimSpace(host))
+	if hostKey == "" || host == "" {
+		return false
+	}
+	return host == hostKey || strings.HasSuffix(host, "."+hostKey)
+}
+
+// chromeWebkitMicros converts a Go time to Chrome's cookie timestamp unit:
+// microseconds since 1601-01-01 UTC (the Windows FILETIME epoch).
+func chromeWebkitMicros(t time.Time) int64 {
+	const webkitEpochOffsetMicros = 11644473600 * 1_000_000
+	return t.UnixMicro() + webkitEpochOffsetMicros
+}
+
+// extractChromeCookies returns every yht_access_token cookie in the given
+// Chrome profile that has not expired, ordered freshest-first (latest expiry,
+// then most recently created) so the caller's pick is deterministic.
 func extractChromeCookies(ctx context.Context, profile string) ([]chromeCookie, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -86,8 +133,12 @@ func extractChromeCookies(ctx context.Context, profile string) ([]chromeCookie, 
 	}
 	defer db.Close()
 
-	const q = `SELECT host_key, name, hex(encrypted_value) FROM cookies WHERE host_key LIKE ? OR host_key LIKE ?`
-	rows, err := db.QueryContext(ctx, q, "%yyuap%", "%yonyoucloud%")
+	// Filter by cookie name and drop already-expired rows (session cookies have
+	// has_expires=0); order so the latest-expiring, newest cookie comes first.
+	const q = `SELECT host_key, hex(encrypted_value) FROM cookies
+		WHERE name = ? AND (has_expires = 0 OR expires_utc > ?)
+		ORDER BY expires_utc DESC, creation_utc DESC`
+	rows, err := db.QueryContext(ctx, q, chromeCookieName, chromeWebkitMicros(time.Now()))
 	if err != nil {
 		return nil, fmt.Errorf("query Chrome cookies snapshot: %w", err)
 	}
@@ -95,15 +146,15 @@ func extractChromeCookies(ctx context.Context, profile string) ([]chromeCookie, 
 
 	var cookies []chromeCookie
 	for rows.Next() {
-		var domain, name, encryptedHex string
-		if err := rows.Scan(&domain, &name, &encryptedHex); err != nil {
+		var domain, encryptedHex string
+		if err := rows.Scan(&domain, &encryptedHex); err != nil {
 			return nil, fmt.Errorf("scan Chrome cookie row: %w", err)
 		}
 		value, err := decryptChromeCookieValue(encryptedHex, key)
 		if err != nil {
 			continue
 		}
-		cookies = append(cookies, chromeCookie{name: name, value: value, domain: domain})
+		cookies = append(cookies, chromeCookie{value: value, domain: domain})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate Chrome cookies: %w", err)

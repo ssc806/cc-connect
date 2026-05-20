@@ -98,6 +98,33 @@ func TestParseConfigRejectsHelperAndTokenSourceTogether(t *testing.T) {
 	}
 }
 
+func TestParseConfigChromeProfile(t *testing.T) {
+	cfg, err := parseConfig(map[string]any{
+		"robot_id":            "robot",
+		"tenant_id":           "tenant",
+		"access_token_source": "chrome",
+		"chrome_profile":      "Profile 1",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if cfg.chromeProfile != "Profile 1" {
+		t.Fatalf("chromeProfile = %q, want %q", cfg.chromeProfile, "Profile 1")
+	}
+}
+
+func TestParseConfigRejectsChromeProfileWithoutChromeSource(t *testing.T) {
+	_, err := parseConfig(map[string]any{
+		"robot_id":       "robot",
+		"access_token":   "token",
+		"tenant_id":      "tenant",
+		"chrome_profile": "Profile 1",
+	})
+	if err == nil {
+		t.Fatal("parseConfig() error = nil, want rejection of chrome_profile without access_token_source=chrome")
+	}
+}
+
 func TestParseConfigHelperArrayForm(t *testing.T) {
 	cfg, err := parseConfig(map[string]any{
 		"robot_id":  "robot",

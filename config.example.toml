@@ -1085,6 +1085,13 @@ app_secret = "your-feishu-app-secret"
 #
 # Built-in source:
 # access_token_source = "chrome"             # macOS + Google Chrome only; explicit opt-in
+# chrome_profile = "Profile 1"               # optional; Chrome profile directory to read, defaults to "Default".
+#                                            # Set this if you are logged in under a work profile.
+# The Chrome source scopes its cookie lookup to the host in base_url and picks
+# the freshest unexpired yht_access_token, so a browser logged in to several
+# Yonyou environments will not hand back a token minted for the wrong one.
+# Chrome 源会把 cookie 查找限定在 base_url 的 host 上，并选取最新且未过期的
+# yht_access_token——浏览器同时登录多个用友环境时不会拿错环境的 token。
 #
 # Advanced deployments can still use access_token_helper instead of the built-in
 # source. access_token_helper and access_token_source are mutually exclusive.

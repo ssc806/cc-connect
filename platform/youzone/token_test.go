@@ -187,7 +187,7 @@ func TestTokenManagerLazyLoadsViaChromeSource(t *testing.T) {
 	clk := newFakeClock()
 	tm := newTestTokenManagerWithSource(clk, "chrome", "")
 	var calls int32
-	tm.runSource = func(_ context.Context, source string) (helperOutput, error) {
+	tm.runSource = func(_ context.Context, source string, _ tokenSourceConfig) (helperOutput, error) {
 		atomic.AddInt32(&calls, 1)
 		if source != "chrome" {
 			t.Fatalf("source = %q, want chrome", source)
@@ -210,7 +210,7 @@ func TestTokenManagerLazyLoadsViaChromeSource(t *testing.T) {
 func TestTokenManagerChromeSourceForcedRefreshFailureDoesNotFallback(t *testing.T) {
 	clk := newFakeClock()
 	tm := newTestTokenManagerWithSource(clk, "chrome", "static-token")
-	tm.runSource = func(_ context.Context, _ string) (helperOutput, error) {
+	tm.runSource = func(_ context.Context, _ string, _ tokenSourceConfig) (helperOutput, error) {
 		return helperOutput{}, errors.New("Chrome has no yht_access_token")
 	}
 
@@ -220,6 +220,28 @@ func TestTokenManagerChromeSourceForcedRefreshFailureDoesNotFallback(t *testing.
 	}
 	if tok == "static-token" {
 		t.Fatal("forced refresh fell back to the server-rejected static token")
+	}
+}
+
+func TestTokenManagerSourceRefreshHonorsTimeout(t *testing.T) {
+	clk := newFakeClock()
+	tm := newTestTokenManagerWithSource(clk, "chrome", "")
+	tm.helperTimeout = 50 * time.Millisecond
+	tm.runSource = func(ctx context.Context, _ string, _ tokenSourceConfig) (helperOutput, error) {
+		// A stuck source (e.g. a Keychain prompt waiting on the user) returns
+		// only once its context is cancelled. mu is held across the refresh, so
+		// without a deadline this would block every token caller indefinitely.
+		<-ctx.Done()
+		return helperOutput{}, ctx.Err()
+	}
+
+	start := time.Now()
+	_, err := tm.Token(context.Background(), false)
+	if err == nil {
+		t.Fatal("Token() error = nil, want timeout failure")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Token() blocked %s; the refresh timeout was not applied to the source", elapsed)
 	}
 }
 

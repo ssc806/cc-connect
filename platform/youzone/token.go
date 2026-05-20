@@ -46,7 +46,15 @@ const helperStderrCap = 256
 type helperRunner func(ctx context.Context, argv []string, timeout time.Duration) (stdout, stderr []byte, err error)
 
 // tokenSourceRunner executes a built-in access-token source.
-type tokenSourceRunner func(ctx context.Context, source string) (helperOutput, error)
+type tokenSourceRunner func(ctx context.Context, source string, cfg tokenSourceConfig) (helperOutput, error)
+
+// tokenSourceConfig carries the slice of platform config a built-in token
+// source needs to locate the right credential: which host the Chrome source
+// must scope its cookie lookup to, and which Chrome profile to read it from.
+type tokenSourceConfig struct {
+	baseURL       string // scopes Chrome cookies to the configured host
+	chromeProfile string // Chrome profile directory, e.g. "Default" or "Profile 1"; "" => built-in default
+}
 
 // tokenManager owns the YouZone yht_access_token: it serves the cached token,
 // refreshes it through either an external helper or a built-in token source
@@ -60,6 +68,7 @@ type tokenSourceRunner func(ctx context.Context, source string) (helperOutput, e
 type tokenManager struct {
 	helper            []string // argv; empty => static-only, no refresh
 	accessTokenSource string
+	sourceCfg         tokenSourceConfig
 	helperTimeout     time.Duration
 	ttl               time.Duration // expiry fallback when the helper returns none
 	refreshBefore     time.Duration // proactive-refresh lead time before expiry
@@ -85,12 +94,16 @@ func newTokenManager(cfg config) *tokenManager {
 	tm := &tokenManager{
 		helper:            cfg.accessTokenHelper,
 		accessTokenSource: cfg.accessTokenSource,
-		helperTimeout:     cfg.accessTokenHelperTimeout,
-		ttl:               cfg.accessTokenTTL,
-		refreshBefore:     cfg.accessTokenRefreshBefore,
-		runHelper:         runHelperProcess,
-		runSource:         runBuiltInTokenSource,
-		now:               time.Now,
+		sourceCfg: tokenSourceConfig{
+			baseURL:       cfg.baseURL,
+			chromeProfile: cfg.chromeProfile,
+		},
+		helperTimeout: cfg.accessTokenHelperTimeout,
+		ttl:           cfg.accessTokenTTL,
+		refreshBefore: cfg.accessTokenRefreshBefore,
+		runHelper:     runHelperProcess,
+		runSource:     runBuiltInTokenSource,
+		now:           time.Now,
 	}
 	if cfg.accessToken != "" {
 		tm.token = cfg.accessToken
@@ -216,7 +229,13 @@ func (tm *tokenManager) runRefreshProviderLocked(ctx context.Context) (helperOut
 		}
 		return out, nil
 	}
-	out, err := tm.runSource(ctx, tm.accessTokenSource)
+	// Bound the built-in source the same way runHelperProcess bounds the
+	// external helper: mu is held across the whole refresh, so a stuck source
+	// (e.g. a Keychain prompt waiting on the user) would otherwise block every
+	// token caller indefinitely. The caller's ctx usually carries no deadline.
+	runCtx, cancel := context.WithTimeout(ctx, tm.helperTimeout)
+	defer cancel()
+	out, err := tm.runSource(runCtx, tm.accessTokenSource, tm.sourceCfg)
 	if err != nil {
 		return helperOutput{}, fmt.Errorf("%s token source: %w", tm.accessTokenSource, err)
 	}
