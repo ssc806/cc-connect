@@ -1068,6 +1068,34 @@ app_secret = "your-feishu-app-secret"
 # # auto_create_robot = false
 # # robot_explain = "cc-connect"
 #
+# ── access_token_helper: hot token refresh / 运行中热刷新 token ───────────────
+# A static access_token is frozen in memory at startup: once the yht_access_token
+# expires (or you re-login in Chrome) a static-token daemon keeps sending the dead
+# token and YouZone answers getWss with the CAS login page until cc-connect is
+# restarted. For a long-running daemon, prefer access_token_helper — an external
+# command cc-connect runs on demand to fetch a fresh token. access_token then
+# becomes an optional startup fallback only.
+# 静态 access_token 在启动时就固定在内存里：token 过期或你在 Chrome 重新登录后，
+# 只用静态 token 的 daemon 会一直发失效 token，必须重启才能恢复。长期运行的 daemon
+# 建议改用 access_token_helper —— cc-connect 按需运行的外部命令，用于取最新 token；
+# 此时 access_token 仅作为可选的启动兜底。
+#
+# The helper is run directly via exec — never through a shell. The string form
+# must be a single executable path with NO spaces; to pass arguments, use the
+# array (argv) form. It prints the token to stdout, as plain text or JSON:
+#   plain: <yht_access_token>
+#   json:  {"access_token":"<token>","expires_in":54000}
+#          {"access_token":"<token>","expires_at":"2026-05-20T23:10:00+08:00"}
+# helper 永远经 exec 直接执行，绝不走 shell。字符串形式必须是不含空格的单个可执行
+# 文件路径；要传参数请用数组(argv)形式。helper 把 token 打到 stdout（纯文本或 JSON）。
+#
+# access_token_helper = "/path/to/get-youzone-token.mjs"
+# # or the argv form when the command needs arguments:
+# # access_token_helper = ["/usr/bin/env", "node", "/path/to/get-youzone-token.mjs"]
+# access_token_helper_timeout = "10s"     # optional; kill a stuck helper after this
+# access_token_ttl = "14h30m"             # optional; expiry assumed when the helper returns none
+# access_token_refresh_before = "30m"     # optional; refresh this long before expiry
+#
 # ── Proxy / NO_PROXY guidance ────────────────────────────────────────────────
 # YouZone HTTP requests (sendMessage / getWss / listRobots) use Go's default
 # transport and therefore honour HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars.

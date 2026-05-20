@@ -11,6 +11,10 @@ const (
 	defaultReconnectDelays  = "1s,3s,10s,30s"
 	heartbeatXMPPWhitespace = "xmpp-whitespace"
 	heartbeatWSPing         = "ws-ping"
+
+	defaultAccessTokenHelperTimeout = 10 * time.Second
+	defaultAccessTokenTTL           = 14*time.Hour + 30*time.Minute
+	defaultAccessTokenRefreshBefore = 30 * time.Minute
 )
 
 type config struct {
@@ -30,6 +34,15 @@ type config struct {
 	httpTimeout               time.Duration
 	enableTokenHeaderFallback bool
 	logInboundRaw             bool
+
+	// access_token_helper: argv for an external command that prints a fresh
+	// yht_access_token (see token.go). Empty when only the static access_token
+	// is configured. The first element is always the executable; the rest are
+	// literal arguments — the helper is never run through a shell.
+	accessTokenHelper        []string
+	accessTokenHelperTimeout time.Duration
+	accessTokenTTL           time.Duration // fallback expiry when the helper returns no expires_in/expires_at
+	accessTokenRefreshBefore time.Duration // how long before expiry a proactive refresh kicks in
 }
 
 type robotRecord struct {
