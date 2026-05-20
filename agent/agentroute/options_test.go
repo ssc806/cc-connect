@@ -35,11 +35,41 @@ func TestParseOptions_RejectsInvalidURLScheme(t *testing.T) {
 	}
 }
 
-func TestParseOptions_AcceptsWSAndWSS(t *testing.T) {
-	for _, good := range []string{"ws://example.com/x", "wss://example.com/x"} {
+func TestParseOptions_AcceptsWSSAndLoopbackWS(t *testing.T) {
+	// wss:// to any host is fine; ws:// is accepted only to loopback.
+	for _, good := range []string{
+		"wss://example.com/x",
+		"ws://localhost:8080/x",
+		"ws://127.0.0.1/x",
+		"ws://[::1]:9000/x",
+	} {
 		if _, err := parseOptions(map[string]any{"url": good, "token": "secret"}); err != nil {
 			t.Fatalf("expected %q to parse, got %v", good, err)
 		}
+	}
+}
+
+func TestParseOptions_RejectsCleartextWSToRemoteHost(t *testing.T) {
+	_, err := parseOptions(map[string]any{"url": "ws://agent-route.example.com/x", "token": "secret"})
+	if err == nil {
+		t.Fatal("expected error: cleartext ws:// to a non-loopback host exposes the bearer token")
+	}
+	if !strings.Contains(err.Error(), "allow_insecure_ws") || !strings.Contains(err.Error(), "wss://") {
+		t.Errorf("error should point at the wss:// / allow_insecure_ws remedy, got %q", err.Error())
+	}
+}
+
+func TestParseOptions_AllowInsecureWSOverridesRemoteWS(t *testing.T) {
+	o, err := parseOptions(map[string]any{
+		"url":               "ws://agent-route.example.com/x",
+		"token":             "secret",
+		"allow_insecure_ws": true,
+	})
+	if err != nil {
+		t.Fatalf("allow_insecure_ws should permit remote ws://, got %v", err)
+	}
+	if !o.allowInsecureWS {
+		t.Error("allowInsecureWS not parsed")
 	}
 }
 

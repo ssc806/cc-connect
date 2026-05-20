@@ -35,6 +35,8 @@ type fakeServer struct {
 	rejectSend       bool          // answer session.send with accepted=false
 	rejectPermission bool          // answer permission.respond with accepted=false
 	stallCancelClose time.Duration // delay before answering session.cancel/close
+	helloProtocol    string        // when non-empty, overrides connection.hello protocol
+	helloVersion     int           // when non-zero, overrides connection.hello version
 	sessionID        string        // session_id returned by session.start
 	listResult       sessionListResult
 	onSend           func(c *fakeConn, p sessionSendParams)
@@ -166,10 +168,19 @@ func (fc *fakeConn) dispatch(in rpcIncoming) {
 	fs := fc.fs
 	switch in.Method {
 	case methodConnectionHello:
+		fs.mu.Lock()
+		proto, ver := fs.helloProtocol, fs.helloVersion
+		fs.mu.Unlock()
+		if proto == "" {
+			proto = protocolName
+		}
+		if ver == 0 {
+			ver = protocolVersion
+		}
 		fc.reply(in.ID, helloResult{
 			ConnectionID: "conn_fake",
-			Protocol:     protocolName,
-			Version:      protocolVersion,
+			Protocol:     proto,
+			Version:      ver,
 			Capabilities: []string{"text", "stream", "permission", "cancel", "session_list", "resume"},
 		})
 	case methodSessionStart:

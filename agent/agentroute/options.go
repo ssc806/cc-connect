@@ -2,6 +2,7 @@ package agentroute
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -21,6 +22,7 @@ type options struct {
 	requestTimeout    time.Duration
 	heartbeatInterval time.Duration
 	resume            bool
+	allowInsecureWS   bool
 }
 
 const (
@@ -63,6 +65,18 @@ func parseOptions(raw map[string]any) (options, error) {
 		return options{}, fmt.Errorf("agentroute: url scheme must be ws:// or wss://, got %q", u.Scheme)
 	}
 
+	if v, ok := raw["allow_insecure_ws"]; ok {
+		o.allowInsecureWS = asBool(v, false)
+	}
+	// Every connection sends Authorization: Bearer <token>. Plain ws:// would
+	// put that token on the wire in cleartext, so it is allowed only to a
+	// loopback host (dev) or when explicitly overridden with allow_insecure_ws.
+	if u.Scheme == "ws" && !isLoopbackHost(u.Hostname()) && !o.allowInsecureWS {
+		return options{}, fmt.Errorf("agentroute: url uses cleartext ws:// to non-loopback host %q; "+
+			"the bearer token would travel unencrypted — use wss://, or set allow_insecure_ws = true to override",
+			u.Hostname())
+	}
+
 	// workspace fallback order: explicit workspace > work_dir > empty.
 	// Step 2 is what lets a per-workspace cloned agent (engine sets only
 	// work_dir) still report a meaningful session.start.workspace.
@@ -86,6 +100,19 @@ func parseOptions(raw map[string]any) (options, error) {
 	}
 
 	return o, nil
+}
+
+// isLoopbackHost reports whether host is a loopback address or "localhost",
+// the only hosts where cleartext ws:// is acceptable because the bearer token
+// never leaves the machine.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // resolveEnvRef expands a "${ENV_NAME}" reference if the cc-connect config

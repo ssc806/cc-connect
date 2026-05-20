@@ -89,6 +89,7 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		"request_timeout_secs":    int64(a.opts.requestTimeout / time.Second),
 		"heartbeat_interval_secs": int64(a.opts.heartbeatInterval / time.Second),
 		"resume":                  a.opts.resume,
+		"allow_insecure_ws":       a.opts.allowInsecureWS,
 	}
 }
 

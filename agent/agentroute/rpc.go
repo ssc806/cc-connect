@@ -98,6 +98,19 @@ func newRPCClient(ctx context.Context, opts options) (*rpcClient, error) {
 		_ = c.Close()
 		return nil, fmt.Errorf("agentroute: handshake: %w", err)
 	}
+	// connection.hello is the protocol compatibility gate: a server that
+	// negotiates a different protocol or version must be rejected before any
+	// heartbeat or session RPC runs against an incompatible peer.
+	if helloRes.Protocol != protocolName || helloRes.Version != protocolVersion {
+		_ = c.Close()
+		return nil, &ProtocolError{
+			RPCCode:   http.StatusUpgradeRequired,
+			Code:      "protocol_unsupported",
+			Retryable: false,
+			Message: fmt.Sprintf("agent-route negotiated protocol %q v%d, adapter requires %q v%d",
+				helloRes.Protocol, helloRes.Version, protocolName, protocolVersion),
+		}
+	}
 
 	go c.heartbeat()
 	return c, nil

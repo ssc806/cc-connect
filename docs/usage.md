@@ -145,7 +145,7 @@ runtime fan-out.
 type = "agentroute"
 
 [projects.agent.options]
-url = "wss://agent-route.example.com/v1/agent-sessions"  # required, ws:// or wss://
+url = "wss://agent-route.example.com/v1/agent-sessions"  # required, wss:// (ws:// loopback only)
 token = "${AGENT_ROUTE_TOKEN}"                           # required
 project = "cc-connect"
 workspace = "github.com/ssc806/cc-connect"
@@ -157,7 +157,10 @@ resume = true
 ```
 
 - **Endpoint** — `url` must point at the agent-route WebSocket endpoint
-  (`wss://<host>/v1/agent-sessions`) and use the `ws://` or `wss://` scheme.
+  (`wss://<host>/v1/agent-sessions`). `wss://` is required for remote hosts:
+  plain `ws://` is rejected unless the host is loopback (`localhost`,
+  `127.0.0.1`, `::1`) or `allow_insecure_ws = true` is set — without TLS the
+  `Authorization: Bearer` token would travel in cleartext.
 - **Security** — keep `token` in an environment variable or a credential
   store, never in the committed config. `${AGENT_ROUTE_TOKEN}` is expanded
   from the environment at load time, and the token is never written to logs.

@@ -54,6 +54,29 @@ func TestRPC_RejectsUnauthorizedHandshake(t *testing.T) {
 	}
 }
 
+func TestRPC_RejectsProtocolMismatchInHello(t *testing.T) {
+	fs := newFakeServer(t)
+	fs.helloProtocol = "some-other-protocol" // server negotiates a different protocol
+
+	_, err := newRPCClient(context.Background(), testOptions(fs.dialURL()))
+	if err == nil {
+		t.Fatal("expected an error when connection.hello negotiates a different protocol")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "protocol") {
+		t.Errorf("error should identify the protocol mismatch, got %q", err.Error())
+	}
+}
+
+func TestRPC_RejectsVersionMismatchInHello(t *testing.T) {
+	fs := newFakeServer(t)
+	fs.helloVersion = protocolVersion + 1 // server negotiates a future version
+
+	_, err := newRPCClient(context.Background(), testOptions(fs.dialURL()))
+	if err == nil {
+		t.Fatal("expected an error when connection.hello negotiates an incompatible version")
+	}
+}
+
 func TestRPC_DialErrorDoesNotLeakToken(t *testing.T) {
 	fs := newFakeServer(t)
 	fs.rejectAuth = true
