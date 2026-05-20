@@ -157,6 +157,11 @@ func (c *rpcClient) callWithTimeout(ctx context.Context, timeout time.Duration, 
 	}()
 
 	if err := c.writeJSON(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
+		// A failed WebSocket write means the connection is unusable. Fail the
+		// client now so Alive() flips immediately and the engine recycles the
+		// session, instead of leaving it marked alive until the read loop or
+		// heartbeat eventually notices.
+		c.fail(fmt.Errorf("write %s failed: %w", method, err))
 		return fmt.Errorf("agentroute: send %s: %s", method, redactSecrets(err.Error(), c.opts.token))
 	}
 

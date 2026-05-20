@@ -3,6 +3,7 @@ package agentroute
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -467,6 +468,89 @@ func TestConnectionLoss_MarksNotAliveAndEmitsError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("connection loss emitted no EventError")
+	}
+}
+
+func TestSessionSend_NotAcceptedReturnsError(t *testing.T) {
+	fs := newFakeServer(t)
+	fs.rejectSend = true // server answers session.send with accepted=false
+	s := connectSession(t, fs, testOptions(fs.dialURL()), "", "")
+
+	if err := s.Send("go", nil, nil); err == nil {
+		t.Fatal("Send must return an error when session.send is not accepted; " +
+			"otherwise the engine waits for events that never arrive")
+	}
+}
+
+func TestRespondPermission_NotAcceptedKeepsCorrelation(t *testing.T) {
+	fs := newFakeServer(t)
+	fs.rejectPermission = true // server answers permission.respond with accepted=false
+	fs.onSend = func(c *fakeConn, p sessionSendParams) {
+		c.emitEvent(p.SessionID, p.RunID, "e1", 1, protocolEvent{
+			Type: "permission_request", PermissionRequestID: "perm_1", Tool: "shell", Description: "run tests",
+		})
+	}
+	s := connectSession(t, fs, testOptions(fs.dialURL()), "", "")
+	if err := s.Send("go", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if ev := readEvent(t, s); ev.Type != core.EventPermissionRequest {
+		t.Fatalf("expected EventPermissionRequest, got %+v", ev)
+	}
+
+	if err := s.RespondPermission("perm_1", core.PermissionResult{Behavior: "allow"}); err == nil {
+		t.Fatal("RespondPermission must return an error when the answer is not accepted")
+	}
+
+	// A rejected answer must leave the run_id correlation intact for a retry.
+	s.mu.Lock()
+	_, kept := s.permRunIDs["perm_1"]
+	s.mu.Unlock()
+	if !kept {
+		t.Error("rejected permission.respond must keep the run_id correlation")
+	}
+}
+
+func TestAlive_ReflectsClientFailureImmediately(t *testing.T) {
+	fs := newFakeServer(t)
+	s := connectSession(t, fs, testOptions(fs.dialURL()), "", "")
+	if !s.Alive() {
+		t.Fatal("session should be alive after start")
+	}
+
+	// Failing the rpc client must be visible through Alive() at once, without
+	// waiting for the pump goroutine to observe the disconnect.
+	s.client.fail(errors.New("simulated connection failure"))
+	if s.Alive() {
+		t.Fatal("Alive() must be false as soon as the rpc client fails")
+	}
+}
+
+func TestClose_BoundsRPCsWhenServerStalls(t *testing.T) {
+	defer func(orig time.Duration) { closeRPCTimeout = orig }(closeRPCTimeout)
+	closeRPCTimeout = 200 * time.Millisecond
+
+	fs := newFakeServer(t)
+	fs.stallCancelClose = 3 * time.Second // far longer than the close budget
+	s := connectSession(t, fs, testOptions(fs.dialURL()), "", "")
+	if err := s.Send("go", nil, nil); err != nil { // gives Close an active run to cancel
+		t.Fatalf("Send: %v", err)
+	}
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		_ = s.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// cancel + close are each bounded by closeRPCTimeout.
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("Close took %s; it must bound its RPCs, not wait on the stalled server", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on the stalled server instead of bounding its cancel/close RPCs")
 	}
 }
 

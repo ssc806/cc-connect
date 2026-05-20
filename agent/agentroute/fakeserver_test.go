@@ -29,13 +29,16 @@ type fakeServer struct {
 	requests map[string][]json.RawMessage
 
 	// knobs — set by the test before the adapter connects.
-	rejectAuth     bool          // force HTTP 401
-	rejectProtocol bool          // force HTTP 426
-	startDelay     time.Duration // delay before answering session.start
-	sessionID      string        // session_id returned by session.start
-	listResult     sessionListResult
-	onSend         func(c *fakeConn, p sessionSendParams)
-	onStart        func(c *fakeConn, p sessionStartParams)
+	rejectAuth       bool          // force HTTP 401
+	rejectProtocol   bool          // force HTTP 426
+	startDelay       time.Duration // delay before answering session.start
+	rejectSend       bool          // answer session.send with accepted=false
+	rejectPermission bool          // answer permission.respond with accepted=false
+	stallCancelClose time.Duration // delay before answering session.cancel/close
+	sessionID        string        // session_id returned by session.start
+	listResult       sessionListResult
+	onSend           func(c *fakeConn, p sessionSendParams)
+	onStart          func(c *fakeConn, p sessionStartParams)
 
 	connCh chan *fakeConn
 }
@@ -197,24 +200,37 @@ func (fc *fakeConn) dispatch(in rpcIncoming) {
 	case methodSessionSend:
 		var p sessionSendParams
 		_ = json.Unmarshal(in.Params, &p)
+		fs.mu.Lock()
+		rejectSend, onSend := fs.rejectSend, fs.onSend
+		fs.mu.Unlock()
+		status := "running"
+		if rejectSend {
+			status = "rejected"
+		}
 		fc.reply(in.ID, sessionSendResult{
 			SessionID: p.SessionID,
 			RunID:     p.RunID, // echo the client-generated run_id
-			Accepted:  true,
-			Status:    "running",
+			Accepted:  !rejectSend,
+			Status:    status,
 		})
-		fs.mu.Lock()
-		onSend := fs.onSend
-		fs.mu.Unlock()
 		if onSend != nil {
 			onSend(fc, p)
 		}
 	case methodPermissionRespond:
-		fc.reply(in.ID, permissionRespondResult{Accepted: true})
+		fs.mu.Lock()
+		rejectPerm := fs.rejectPermission
+		fs.mu.Unlock()
+		fc.reply(in.ID, permissionRespondResult{Accepted: !rejectPerm})
 	case methodSessionCancel:
-		fc.reply(in.ID, sessionCancelResult{Accepted: true, Status: "cancelling"})
+		fs.mu.Lock()
+		stall := fs.stallCancelClose
+		fs.mu.Unlock()
+		fc.replyMaybeStalled(in.ID, stall, sessionCancelResult{Accepted: true, Status: "cancelling"})
 	case methodSessionClose:
-		fc.reply(in.ID, sessionCloseResult{Closed: true})
+		fs.mu.Lock()
+		stall := fs.stallCancelClose
+		fs.mu.Unlock()
+		fc.replyMaybeStalled(in.ID, stall, sessionCloseResult{Closed: true})
 	case methodSessionList:
 		fs.mu.Lock()
 		res := fs.listResult
@@ -237,6 +253,20 @@ func (fc *fakeConn) write(v any) {
 func (fc *fakeConn) reply(id string, result any) {
 	raw, _ := json.Marshal(result)
 	fc.write(map[string]any{"jsonrpc": "2.0", "id": id, "result": json.RawMessage(raw)})
+}
+
+// replyMaybeStalled answers id, optionally after delay. The delay runs in a
+// goroutine so the serve loop keeps reading — the connection can still be torn
+// down promptly while a stalled reply is pending.
+func (fc *fakeConn) replyMaybeStalled(id string, delay time.Duration, result any) {
+	if delay <= 0 {
+		fc.reply(id, result)
+		return
+	}
+	go func() {
+		time.Sleep(delay)
+		fc.reply(id, result)
+	}()
 }
 
 func (fc *fakeConn) replyError(id string, e *rpcError) {

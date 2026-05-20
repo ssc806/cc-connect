@@ -8,9 +8,19 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// closeRPCTimeout bounds each best-effort session.cancel / session.close RPC
+// issued by Close(). It is deliberately small and independent of the
+// configurable request timeout: Close() must hand control back to the engine
+// quickly (the engine abandons AgentSession.Close() after 130s), and a
+// cancel/close ack that does not arrive within a few seconds is not worth
+// waiting for — the websocket teardown that follows ends the remote run anyway.
+// It is a var, not a const, only so tests can shrink it.
+var closeRPCTimeout = 5 * time.Second
 
 // session implements core.AgentSession over one rpcClient connection.
 //
@@ -124,6 +134,11 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	if res.RunID != "" && res.RunID != runID {
 		return fmt.Errorf("agentroute: session.send echoed run_id %q, expected %q", res.RunID, runID)
 	}
+	// accepted=false means the turn was refused and no events will stream for
+	// it; fail the call so the engine does not wait for output that never comes.
+	if !res.Accepted {
+		return fmt.Errorf("agentroute: session.send for run %q was not accepted by agent-route (status %q)", runID, res.Status)
+	}
 	return nil
 }
 
@@ -134,9 +149,6 @@ func (s *session) RespondPermission(requestID string, result core.PermissionResu
 	s.mu.Lock()
 	runID, ok := s.permRunIDs[requestID]
 	sessionID := s.sessionID
-	if ok {
-		delete(s.permRunIDs, requestID)
-	}
 	s.mu.Unlock()
 
 	if !ok {
@@ -157,6 +169,14 @@ func (s *session) RespondPermission(requestID string, result core.PermissionResu
 	if err := s.client.call(context.Background(), methodPermissionRespond, params, &res); err != nil {
 		return fmt.Errorf("agentroute: permission.respond: %w", err)
 	}
+	if !res.Accepted {
+		return fmt.Errorf("agentroute: permission.respond for %q was not accepted by agent-route", requestID)
+	}
+	// Drop the correlation only after the server confirms the answer, so a
+	// failed or rejected attempt leaves the run_id mapping intact for a retry.
+	s.mu.Lock()
+	delete(s.permRunIDs, requestID)
+	s.mu.Unlock()
 	return nil
 }
 
@@ -173,8 +193,20 @@ func (s *session) CurrentSessionID() string {
 
 // Alive reports whether the connection is still usable. It flips to false the
 // moment the connection is lost or Close ran, so the engine recycles the
-// state and reconnects via StartSession.
-func (s *session) Alive() bool { return s.alive.Load() }
+// state and reconnects via StartSession. It also consults the rpc client
+// directly so a failed write is reflected immediately, without waiting for the
+// pump goroutine to observe the disconnect.
+func (s *session) Alive() bool {
+	if !s.alive.Load() {
+		return false
+	}
+	select {
+	case <-s.client.Done():
+		return false
+	default:
+		return true
+	}
+}
 
 // Close cancels the active run (when known), closes the route session, and
 // tears down the websocket. It is safe to call more than once.
@@ -188,10 +220,12 @@ func (s *session) Close() error {
 		s.activeRunID = ""
 		s.mu.Unlock()
 
-		// Best-effort cancel of an in-flight run.
+		// Best-effort cancel of an in-flight run, bounded by closeRPCTimeout
+		// (not the configurable request timeout) so a slow or unresponsive
+		// agent-route cannot stall shutdown.
 		if runID != "" {
 			var res sessionCancelResult
-			_ = s.client.call(context.Background(), methodSessionCancel, sessionCancelParams{
+			_ = s.client.callWithTimeout(context.Background(), closeRPCTimeout, methodSessionCancel, sessionCancelParams{
 				RequestID: newRequestID(),
 				SessionID: sessionID,
 				RunID:     runID,
@@ -200,12 +234,13 @@ func (s *session) Close() error {
 		}
 
 		var closeRes sessionCloseResult
-		_ = s.client.call(context.Background(), methodSessionClose, sessionCloseParams{
+		_ = s.client.callWithTimeout(context.Background(), closeRPCTimeout, methodSessionClose, sessionCloseParams{
 			RequestID: newRequestID(),
 			SessionID: sessionID,
 			Reason:    "client_session_closed",
 		}, &closeRes)
 
+		// Always tear the websocket down, even if the RPCs above timed out.
 		_ = s.client.Close()
 	})
 	return nil

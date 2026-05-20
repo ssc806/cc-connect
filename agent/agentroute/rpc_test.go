@@ -2,6 +2,7 @@ package agentroute
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,37 @@ func TestRPC_NotificationsReachEventsChannel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("session.event notification never reached the events channel")
+	}
+}
+
+// errWriteConn is a websocketConn whose writes always fail, used to exercise
+// the write-failure path without a real connection.
+type errWriteConn struct{}
+
+func (errWriteConn) ReadJSON(any) error  { return errors.New("errWriteConn: read not used") }
+func (errWriteConn) WriteJSON(any) error { return errors.New("simulated write failure") }
+func (errWriteConn) Close() error        { return nil }
+
+func TestRPC_WriteFailureFailsClient(t *testing.T) {
+	c := &rpcClient{
+		conn:    errWriteConn{},
+		opts:    options{requestTimeout: time.Second},
+		pending: map[string]chan rpcResponse{},
+		events:  make(chan sessionEventNotification, 1),
+		closed:  make(chan struct{}),
+	}
+
+	var res pingResult
+	if err := c.call(context.Background(), methodPing, pingParams{}, &res); err == nil {
+		t.Fatal("call must fail when the websocket write fails")
+	}
+
+	// A failed write must fail the client immediately so the engine recycles
+	// the session instead of leaving a dead connection marked alive.
+	select {
+	case <-c.Done():
+	default:
+		t.Fatal("a failed write must fail the client so Done() is closed")
 	}
 }
 
