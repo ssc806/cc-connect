@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 )
 
-// Protocol identity (cc-connect-agent-route-jsonrpc-v1 §3, §7.1).
+// Protocol identity for the agent-route JSON-RPC 2.0 protocol.
 const (
 	protocolName    = "agentroute-jsonrpc"
 	protocolVersion = 1

@@ -136,9 +136,48 @@ func TestRPC_NotificationsReachEventsChannel(t *testing.T) {
 // the write-failure path without a real connection.
 type errWriteConn struct{}
 
-func (errWriteConn) ReadJSON(any) error  { return errors.New("errWriteConn: read not used") }
-func (errWriteConn) WriteJSON(any) error { return errors.New("simulated write failure") }
-func (errWriteConn) Close() error        { return nil }
+func (errWriteConn) ReadJSON(any) error               { return errors.New("errWriteConn: read not used") }
+func (errWriteConn) WriteJSON(any) error              { return errors.New("simulated write failure") }
+func (errWriteConn) SetWriteDeadline(time.Time) error { return nil }
+func (errWriteConn) Close() error                     { return nil }
+
+// deadlineConn records the write deadline set before each WriteJSON call.
+type deadlineConn struct {
+	deadline time.Time
+	written  bool
+}
+
+func (*deadlineConn) ReadJSON(any) error { return errors.New("deadlineConn: read not used") }
+func (c *deadlineConn) SetWriteDeadline(t time.Time) error {
+	c.deadline = t
+	return nil
+}
+func (c *deadlineConn) WriteJSON(any) error { c.written = true; return nil }
+func (*deadlineConn) Close() error          { return nil }
+
+func TestRPC_WriteCarriesDeadline(t *testing.T) {
+	dc := &deadlineConn{}
+	c := &rpcClient{
+		conn:    dc,
+		opts:    options{requestTimeout: 30 * time.Second},
+		pending: map[string]chan rpcResponse{},
+		events:  make(chan sessionEventNotification, 1),
+		closed:  make(chan struct{}),
+	}
+
+	// No read loop runs, so the call times out waiting for a response — but
+	// the write must already have happened, bounded by a deadline.
+	var res pingResult
+	if err := c.callWithTimeout(context.Background(), 50*time.Millisecond, methodPing, pingParams{}, &res); err == nil {
+		t.Fatal("expected a timeout error with no response")
+	}
+	if !dc.written {
+		t.Fatal("WriteJSON was never called")
+	}
+	if dc.deadline.IsZero() {
+		t.Error("write must be bounded by a deadline; SetWriteDeadline received the zero time")
+	}
+}
 
 func TestRPC_WriteFailureFailsClient(t *testing.T) {
 	c := &rpcClient{

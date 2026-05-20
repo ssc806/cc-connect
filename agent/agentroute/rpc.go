@@ -26,6 +26,7 @@ var errClientClosed = errors.New("agentroute: connection closed")
 type websocketConn interface {
 	ReadJSON(v any) error
 	WriteJSON(v any) error
+	SetWriteDeadline(t time.Time) error
 	Close() error
 }
 
@@ -169,7 +170,10 @@ func (c *rpcClient) callWithTimeout(ctx context.Context, timeout time.Duration, 
 		c.pendingMu.Unlock()
 	}()
 
-	if err := c.writeJSON(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
+	// The write is bounded by the call's own timeout: a stalled socket must
+	// not block here before the response timer below even starts, otherwise a
+	// stuck write would slip past callWithTimeout and the bounded Close() path.
+	if err := c.writeJSON(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}, timeout); err != nil {
 		// A failed WebSocket write means the connection is unusable. Fail the
 		// client now so Alive() flips immediately and the engine recycles the
 		// session, instead of leaving it marked alive until the read loop or
@@ -280,10 +284,21 @@ func (c *rpcClient) heartbeat() {
 	}
 }
 
-// writeJSON serializes one frame onto the connection.
-func (c *rpcClient) writeJSON(v any) error {
+// writeJSON serializes one frame onto the connection, bounded by a write
+// deadline derived from timeout so a stalled socket cannot block longer than
+// the caller's RPC budget. The deadline is set under writeMu together with the
+// write so concurrent callers cannot clobber each other's deadline. A timeout
+// of 0 clears any deadline (unbounded write).
+func (c *rpcClient) writeJSON(v any, timeout time.Duration) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
 	return c.conn.WriteJSON(v)
 }
 

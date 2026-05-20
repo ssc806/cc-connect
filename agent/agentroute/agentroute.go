@@ -1,10 +1,10 @@
 // Package agentroute is a cc-connect agent adapter that uses a cloud
 // agent-route service as a remote core.Agent.
 //
-// The adapter speaks WebSocket + JSON-RPC 2.0 (see
-// docs/agent-route/cc-connect-agent-route-jsonrpc-v1.md). cc-connect keeps all
-// IM platform handling and local user interaction; agent-route owns cloud
-// session management, agent routing, provisioning, and runtime fan-out.
+// The adapter speaks the agent-route WebSocket + JSON-RPC 2.0 protocol.
+// cc-connect keeps all IM platform handling and local user interaction;
+// agent-route owns cloud session management, agent routing, provisioning,
+// and runtime fan-out.
 //
 // The adapter adds no agent-route special cases to core.Engine. It opts into
 // the generic optional interfaces core already defines — SessionEnvInjector
