@@ -157,7 +157,8 @@ func TestBuildOutboundMessageDigestTruncatesLongContent(t *testing.T) {
 func TestStripMarkdownToPlainText(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"# Heading\ntext", "Heading text"},
-		{"**bold** and *italic* and __b2__ and _i2_", "bold and italic and b2 and i2"},
+		{"**bold** and *italic* and __b2__ and _i2_", "bold and italic and __b2__ and _i2_"},
+		{"my_func_name __init__ __version__", "my_func_name __init__ __version__"},
 		{"see [docs](https://example.test) here", "see docs here"},
 		{"![alt](https://img.test/x.png) caption", "alt caption"},
 		{"- one\n- two\n1. three", "one two three"},
