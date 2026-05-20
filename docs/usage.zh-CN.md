@@ -131,6 +131,39 @@ mode = "default"
 
 ---
 
+## 云端 AgentRoute（`agentroute`）
+
+`agentroute` 通过 WebSocket + JSON-RPC 2.0 把云端 `agent-route` 服务当作远程
+agent 使用。cc-connect 仍在本地处理所有 IM 平台交互；`agent-route` 负责云端
+会话管理、agent 路由、provisioning 与 runtime 分发。
+
+```toml
+[projects.agent]
+type = "agentroute"
+
+[projects.agent.options]
+url = "wss://agent-route.example.com/v1/agent-sessions"  # 必填，wss://（ws:// 仅限 loopback）
+token = "${AGENT_ROUTE_TOKEN}"                           # 必填
+project = "cc-connect"
+workspace = "github.com/ssc806/cc-connect"
+default_agent = "codex"
+connect_timeout_secs = 15    # 拨号 + 握手预算
+request_timeout_secs = 120   # 单次调用预算（provisioning 等待也在此预算内）
+heartbeat_interval_secs = 30
+resume = true
+```
+
+- **端点** —— `url` 必须指向 agent-route 的 WebSocket 端点
+  （`wss://<host>/v1/agent-sessions`）。远端必须使用 `wss://`：明文 `ws://`
+  会被拒绝，除非 host 是 loopback（`localhost`、`127.0.0.1`、`::1`）或显式
+  设置 `allow_insecure_ws = true`——否则 `Authorization: Bearer` token 会以
+  明文传输。
+- **安全** —— `token` 请放在环境变量或凭证库中，不要写进提交到仓库的配置。
+  `${AGENT_ROUTE_TOKEN}` 会在加载时从环境变量展开，且 token 不会写入日志。
+- **当前限制** —— 大附件需要对象存储支持，目前尚未实现，仅保留了消息结构。
+
+---
+
 ## API Provider 管理
 
 运行时切换 API Provider，无需重启。

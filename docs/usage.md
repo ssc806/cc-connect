@@ -133,6 +133,42 @@ Switch at runtime:
 
 ---
 
+## Cloud AgentRoute (`agentroute`)
+
+`agentroute` uses a cloud `agent-route` service as a remote agent over
+WebSocket + JSON-RPC 2.0. cc-connect keeps all IM platform handling local;
+`agent-route` owns cloud session management, agent routing, provisioning, and
+runtime fan-out.
+
+```toml
+[projects.agent]
+type = "agentroute"
+
+[projects.agent.options]
+url = "wss://agent-route.example.com/v1/agent-sessions"  # required, wss:// (ws:// loopback only)
+token = "${AGENT_ROUTE_TOKEN}"                           # required
+project = "cc-connect"
+workspace = "github.com/ssc806/cc-connect"
+default_agent = "codex"
+connect_timeout_secs = 15    # dial + handshake budget
+request_timeout_secs = 120   # per-call budget (provisioning waits live here)
+heartbeat_interval_secs = 30
+resume = true
+```
+
+- **Endpoint** — `url` must point at the agent-route WebSocket endpoint
+  (`wss://<host>/v1/agent-sessions`). `wss://` is required for remote hosts:
+  plain `ws://` is rejected unless the host is loopback (`localhost`,
+  `127.0.0.1`, `::1`) or `allow_insecure_ws = true` is set — without TLS the
+  `Authorization: Bearer` token would travel in cleartext.
+- **Security** — keep `token` in an environment variable or a credential
+  store, never in the committed config. `${AGENT_ROUTE_TOKEN}` is expanded
+  from the environment at load time, and the token is never written to logs.
+- **Current limitation** — large attachments require object-storage support,
+  which is not yet implemented; only the message shape is in place.
+
+---
+
 ## API Provider Management
 
 Switch between API providers at runtime without restart.
