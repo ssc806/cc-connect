@@ -198,22 +198,21 @@ func peerUserSegment(s string) string {
 }
 
 // Regexes for stripMarkdownToPlainText. Go's RE2 has no backreferences, so
-// YonClaw's `(\*\*|__)(.*?)\1` bold and `(\*|_)(.*?)\1` italic rules are split
-// into separate `**…**` / `__…__` and `*…*` / `_…_` passes, and its three
-// "remove N-or-more backticks" passes collapse into one "remove all backticks".
+// YonClaw's `(\*\*|__)(.*?)\1` bold rule is kept only for `**…**` here, and
+// its `(\*|_)(.*?)\1` italic rule is kept only for `*…*`. Underscore emphasis
+// is deliberately not stripped because identifiers like my_func_name,
+// __init__, and __version__ are common in agent output previews.
 var (
-	mdLineBreaks  = regexp.MustCompile(`\r\n?`)
-	mdImage       = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`)
-	mdLink        = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
-	mdHeading     = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
-	mdBullet      = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
-	mdOrdered     = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
-	mdBoldStar    = regexp.MustCompile(`\*\*(.*?)\*\*`)
-	mdBoldUnder   = regexp.MustCompile(`__(.*?)__`)
-	mdItalicStar  = regexp.MustCompile(`\*(.*?)\*`)
-	mdItalicUnder = regexp.MustCompile(`_(.*?)_`)
-	mdPunct       = regexp.MustCompile(`[#!\[\]]`)
-	mdSpaces      = regexp.MustCompile(`\s+`)
+	mdLineBreaks = regexp.MustCompile(`\r\n?`)
+	mdImage      = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`)
+	mdLink       = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+	mdHeading    = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
+	mdBullet     = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+	mdOrdered    = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
+	mdBoldStar   = regexp.MustCompile(`\*\*(.*?)\*\*`)
+	mdItalicStar = regexp.MustCompile(`\*(.*?)\*`)
+	mdPunct      = regexp.MustCompile(`[#!\[\]]`)
+	mdSpaces     = regexp.MustCompile(`\s+`)
 )
 
 // stripMarkdownToPlainText is a faithful port of YonClaw's
@@ -227,9 +226,7 @@ func stripMarkdownToPlainText(s string) string {
 	s = mdBullet.ReplaceAllString(s, "")
 	s = mdOrdered.ReplaceAllString(s, "")
 	s = mdBoldStar.ReplaceAllString(s, "$1")
-	s = mdBoldUnder.ReplaceAllString(s, "$1")
 	s = mdItalicStar.ReplaceAllString(s, "$1")
-	s = mdItalicUnder.ReplaceAllString(s, "$1")
 	s = strings.ReplaceAll(s, "`", "")
 	s = mdPunct.ReplaceAllString(s, " ")
 	s = mdSpaces.ReplaceAllString(s, " ")
