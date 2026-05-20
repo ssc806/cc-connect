@@ -3,6 +3,10 @@
 package youzone
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/hex"
 	"testing"
 	"time"
 )
@@ -61,6 +65,71 @@ func TestCookieHostMatches(t *testing.T) {
 				t.Errorf("cookieHostMatches(%q, %q) = %v, want %v", c.hostKey, c.host, got, c.want)
 			}
 		})
+	}
+}
+
+// encryptChromeCookieValue is the inverse of decryptChromeCookieValue: it
+// builds a hex-encoded v10 encrypted_value blob from plaintext so the decrypt
+// path can be exercised without a real Chrome cookie store.
+func encryptChromeCookieValue(t *testing.T, plain, key []byte) string {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	bs := block.BlockSize()
+	pad := bs - len(plain)%bs // PKCS#7
+	padded := append(append([]byte{}, plain...), bytes.Repeat([]byte{byte(pad)}, pad)...)
+	enc := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, bytes.Repeat([]byte{0x20}, bs)).CryptBlocks(enc, padded)
+	return hex.EncodeToString(append([]byte("v10"), enc...))
+}
+
+func TestDecryptChromeCookieValueStripsDomainHashOnV24(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 16) // AES-128, as chromeSafeStorageKey derives
+	domainHash := bytes.Repeat([]byte{0xAB}, chromeDomainHashLen)
+	token := []byte("real-yht-access-token-value")
+
+	enc := encryptChromeCookieValue(t, append(domainHash, token...), key)
+	got, err := decryptChromeCookieValue(enc, key, true)
+	if err != nil {
+		t.Fatalf("decryptChromeCookieValue() error = %v", err)
+	}
+	if got != string(token) {
+		t.Errorf("decrypted = %q, want %q", got, token)
+	}
+}
+
+func TestDecryptChromeCookieValueEmptyV24CookieIsNotAToken(t *testing.T) {
+	// A value-less domain-bound cookie decrypts to exactly the 32-byte hash on a
+	// v24 DB. Version-aware stripping must return an empty string, not surface
+	// the hash digest as a 32-byte "token".
+	key := bytes.Repeat([]byte{0x42}, 16)
+	domainHash := bytes.Repeat([]byte{0xAB}, chromeDomainHashLen)
+
+	enc := encryptChromeCookieValue(t, domainHash, key)
+	got, err := decryptChromeCookieValue(enc, key, true)
+	if err != nil {
+		t.Fatalf("decryptChromeCookieValue() error = %v", err)
+	}
+	if got != "" {
+		t.Errorf("decrypted = %q (len %d), want empty", got, len(got))
+	}
+}
+
+func TestDecryptChromeCookieValuePreV24DoesNotStrip(t *testing.T) {
+	// On a pre-v24 DB the plaintext is the value itself; nothing is stripped,
+	// even when the value happens to be longer than the v24 hash prefix.
+	key := bytes.Repeat([]byte{0x42}, 16)
+	token := []byte("a-token-value-that-is-clearly-longer-than-32-bytes")
+
+	enc := encryptChromeCookieValue(t, token, key)
+	got, err := decryptChromeCookieValue(enc, key, false)
+	if err != nil {
+		t.Fatalf("decryptChromeCookieValue() error = %v", err)
+	}
+	if got != string(token) {
+		t.Errorf("decrypted = %q, want %q", got, token)
 	}
 }
 

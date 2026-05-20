@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,12 @@ const (
 	defaultChromeProfile = "Default"
 	chromeSafeStorage    = "Chrome Safe Storage"
 	chromeCookieName     = "yht_access_token"
+
+	// chromeDomainHashVersion is the Cookies DB schema version at which Chrome
+	// began prefixing every decrypted cookie value with a 32-byte SHA-256 hash
+	// of the cookie's domain. chromeDomainHashLen is that prefix's length.
+	chromeDomainHashVersion = 24
+	chromeDomainHashLen     = 32
 )
 
 type chromeCookie struct {
@@ -133,6 +140,11 @@ func extractChromeCookies(ctx context.Context, profile string) ([]chromeCookie, 
 	}
 	defer db.Close()
 
+	hasDomainHash, err := chromeCookieValuesHaveDomainHash(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+
 	// Filter by cookie name and drop already-expired rows (session cookies have
 	// has_expires=0); order so the latest-expiring, newest cookie comes first.
 	const q = `SELECT host_key, hex(encrypted_value) FROM cookies
@@ -150,7 +162,7 @@ func extractChromeCookies(ctx context.Context, profile string) ([]chromeCookie, 
 		if err := rows.Scan(&domain, &encryptedHex); err != nil {
 			return nil, fmt.Errorf("scan Chrome cookie row: %w", err)
 		}
-		value, err := decryptChromeCookieValue(encryptedHex, key)
+		value, err := decryptChromeCookieValue(encryptedHex, key, hasDomainHash)
 		if err != nil {
 			continue
 		}
@@ -160,6 +172,22 @@ func extractChromeCookies(ctx context.Context, profile string) ([]chromeCookie, 
 		return nil, fmt.Errorf("iterate Chrome cookies: %w", err)
 	}
 	return cookies, nil
+}
+
+// chromeCookieValuesHaveDomainHash reports whether the Cookies DB is new enough
+// (schema v24+) that each decrypted cookie value carries a 32-byte domain-hash
+// prefix. Reading the schema version is more reliable than guessing from the
+// decrypted length, which misclassifies short or empty cookies.
+func chromeCookieValuesHaveDomainHash(ctx context.Context, db *sql.DB) (bool, error) {
+	var raw string
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'version'`).Scan(&raw); err != nil {
+		return false, fmt.Errorf("read Chrome cookie DB schema version: %w", err)
+	}
+	version, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("parse Chrome cookie DB schema version %q: %w", raw, err)
+	}
+	return version >= chromeDomainHashVersion, nil
 }
 
 func copyChromeCookieDB(src string) (string, func(), error) {
@@ -207,7 +235,12 @@ func chromeSafeStorageKey(ctx context.Context) ([]byte, error) {
 	return pbkdf2.Key([]byte(password), []byte("saltysalt"), 1003, 16, sha1.New), nil
 }
 
-func decryptChromeCookieValue(encryptedHex string, key []byte) (string, error) {
+// decryptChromeCookieValue decrypts a hex-encoded Chrome encrypted_value blob.
+// When hasDomainHash is set (Cookies DB schema v24+) the decrypted plaintext is
+// prefixed with a 32-byte SHA-256 domain hash, which is stripped — a value-less
+// cookie then decrypts to exactly the hash and correctly comes back empty,
+// rather than being mistaken for a 32-byte token.
+func decryptChromeCookieValue(encryptedHex string, key []byte, hasDomainHash bool) (string, error) {
 	raw, err := hex.DecodeString(encryptedHex)
 	if err != nil {
 		return "", err
@@ -233,8 +266,11 @@ func decryptChromeCookieValue(encryptedHex string, key []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(plain) > 32 {
-		plain = plain[32:]
+	if hasDomainHash {
+		if len(plain) < chromeDomainHashLen {
+			return "", fmt.Errorf("decrypted cookie is shorter than the v24 domain-hash prefix")
+		}
+		plain = plain[chromeDomainHashLen:]
 	}
 	return string(plain), nil
 }

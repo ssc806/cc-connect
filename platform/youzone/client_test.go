@@ -379,6 +379,40 @@ func TestClientSendMessageRefreshesTokenOn401(t *testing.T) {
 	}
 }
 
+func TestClientSendMessageDoesNotRetryOnGatewayErrorPage(t *testing.T) {
+	// A transient proxy/gateway HTTP 502 is delivered as an HTML error page but
+	// is not an auth failure: it must not refresh the token nor resend the POST,
+	// or a message the server already accepted could be duplicated.
+	var reqCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&reqCount, 1)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html><body><h1>502 Bad Gateway</h1></body></html>"))
+	}))
+	defer server.Close()
+
+	c := newClient(testHelperClientConfig(server.URL), server.Client())
+	var helperCalls int32
+	c.tokens.runHelper = fixedTokenHelper("refreshed-token", &helperCalls)
+	out, err := buildOutboundMessage("hello", replyContext{})
+	if err != nil {
+		t.Fatalf("buildOutboundMessage() error = %v", err)
+	}
+
+	captureLogs(t, func() {
+		if _, err := c.sendMessage(context.Background(), "robot-1", out); err == nil {
+			t.Fatal("sendMessage() error = nil, want failure on HTTP 502")
+		}
+	})
+	if reqCount != 1 {
+		t.Errorf("server saw %d requests, want 1 (a 502 error page must not trigger a retry)", reqCount)
+	}
+	if helperCalls != 0 {
+		t.Errorf("helper invoked %d times, want 0 (a 502 error page must not trigger a token refresh)", helperCalls)
+	}
+}
+
 func TestClientListRobotsRefreshesTokenOnLoginPage(t *testing.T) {
 	var reqCount int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

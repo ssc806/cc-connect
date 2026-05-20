@@ -325,7 +325,7 @@ func (c *client) standardAuthFailed(resp *http.Response, body []byte) bool {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return true
 	}
-	if isLoginPage(resp, body) {
+	if isLoginPage(body) {
 		return true
 	}
 	if code, ok := businessCode(body); ok && authExpiredBusinessCodes[code] {
@@ -334,20 +334,15 @@ func (c *client) standardAuthFailed(resp *http.Response, body []byte) bool {
 	return false
 }
 
-// isLoginPage reports whether a response is the CAS/SSO login page YOUZONE
-// serves when yht_access_token is missing or expired. YOUZONE's JSON APIs
-// never legitimately return HTML, so an HTML content-type is itself a strong
-// signal; the body is also scanned for CAS markers to catch login HTML
-// delivered with a misleading content-type.
-func isLoginPage(resp *http.Response, body []byte) bool {
-	if htmlContentType(resp) && len(bytes.TrimSpace(body)) > 0 {
-		return true
-	}
+// isLoginPage reports whether a response body is the CAS/SSO login page YOUZONE
+// serves when yht_access_token is missing or expired. Detection keys on
+// CAS/login markers in the body — not on an HTML content-type alone. A
+// transient proxy or gateway failure (502/503/504) is also delivered as an HTML
+// error page; classifying that as an auth failure would force a needless token
+// refresh and, because sendMessage retries POSTs on an auth failure, risk
+// resending a message the server may already have accepted.
+func isLoginPage(body []byte) bool {
 	return containsAnyFold(body, strongLoginMarkers)
-}
-
-func htmlContentType(resp *http.Response) bool {
-	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
 }
 
 // looksLikeLoginContext is the loose login heuristic for getWss. It is only
