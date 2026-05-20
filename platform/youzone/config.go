@@ -17,6 +17,10 @@ func parseConfig(opts map[string]any) (config, error) {
 		pingInterval:       defaultPingInterval,
 		reconnectDelays:    []time.Duration{time.Second, 3 * time.Second, 10 * time.Second, 30 * time.Second},
 		httpTimeout:        defaultHTTPTimeout,
+
+		accessTokenHelperTimeout: defaultAccessTokenHelperTimeout,
+		accessTokenTTL:           defaultAccessTokenTTL,
+		accessTokenRefreshBefore: defaultAccessTokenRefreshBefore,
 	}
 	if v := optString(opts, "base_url"); v != "" {
 		cfg.baseURL = strings.TrimRight(v, "/")
@@ -72,8 +76,27 @@ func parseConfig(opts map[string]any) (config, error) {
 		}
 		cfg.httpTimeout = d
 	}
-	if cfg.accessToken == "" {
-		return cfg, fmt.Errorf("youzone: access_token is required")
+	helper, err := optStringList(opts, "access_token_helper")
+	if err != nil {
+		return cfg, fmt.Errorf("youzone: access_token_helper: %w", err)
+	}
+	cfg.accessTokenHelper = helper
+	cfg.accessTokenSource = strings.ToLower(optString(opts, "access_token_source"))
+	if cfg.accessTokenSource != "" && cfg.accessTokenSource != accessTokenSourceChrome {
+		return cfg, fmt.Errorf("youzone: access_token_source must be %q", accessTokenSourceChrome)
+	}
+	if len(cfg.accessTokenHelper) > 0 && cfg.accessTokenSource != "" {
+		return cfg, fmt.Errorf("youzone: access_token_helper and access_token_source are mutually exclusive")
+	}
+	cfg.chromeProfile = optString(opts, "chrome_profile")
+	if cfg.chromeProfile != "" && cfg.accessTokenSource != accessTokenSourceChrome {
+		return cfg, fmt.Errorf("youzone: chrome_profile only applies when access_token_source = %q", accessTokenSourceChrome)
+	}
+	if err := parseHelperDurations(opts, &cfg); err != nil {
+		return cfg, err
+	}
+	if len(cfg.accessTokenHelper) == 0 && cfg.accessTokenSource == "" && cfg.accessToken == "" {
+		return cfg, fmt.Errorf("youzone: access_token is required unless access_token_helper or access_token_source is configured")
 	}
 	if cfg.tenantID == "" {
 		return cfg, fmt.Errorf("youzone: tenant_id is required")
@@ -95,6 +118,93 @@ func optString(opts map[string]any, key string) string {
 func optBool(opts map[string]any, key string) bool {
 	v, _ := opts[key].(bool)
 	return v
+}
+
+// optStringList reads an option that may be either a single string (a bare
+// executable path) or a TOML array of strings (argv). The string form is
+// rejected when it contains whitespace: splitting it on spaces would turn the
+// helper option into a shell-injection surface, so a command that needs
+// arguments must use the explicit array form instead.
+func optStringList(opts map[string]any, key string) ([]string, error) {
+	v, ok := opts[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	switch t := v.(type) {
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return nil, nil
+		}
+		if strings.ContainsAny(s, " \t\n\r") {
+			return nil, fmt.Errorf("string form must be a single executable path with no spaces; use the array form to pass arguments")
+		}
+		return []string{s}, nil
+	case []string:
+		return validateArgv(t)
+	case []any:
+		argv := make([]string, 0, len(t))
+		for _, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return nil, fmt.Errorf("array elements must all be strings")
+			}
+			argv = append(argv, s)
+		}
+		return validateArgv(argv)
+	default:
+		return nil, fmt.Errorf("must be a string or an array of strings")
+	}
+}
+
+func validateArgv(argv []string) ([]string, error) {
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("array must not be empty")
+	}
+	for _, e := range argv {
+		if strings.TrimSpace(e) == "" {
+			return nil, fmt.Errorf("array must not contain empty elements")
+		}
+	}
+	return argv, nil
+}
+
+// parseHelperDurations parses and validates the three access-token timing
+// options. Validation fails loudly rather than silently reverting to defaults:
+// a non-positive helper timeout leaves a stuck helper holding the refresh lock
+// forever, and a refresh-before window that meets or exceeds the TTL puts every
+// freshly fetched token straight back into the refresh window.
+func parseHelperDurations(opts map[string]any, cfg *config) error {
+	for _, d := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"access_token_helper_timeout", &cfg.accessTokenHelperTimeout},
+		{"access_token_ttl", &cfg.accessTokenTTL},
+		{"access_token_refresh_before", &cfg.accessTokenRefreshBefore},
+	} {
+		if v := optString(opts, d.key); v != "" {
+			parsed, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("youzone: %s: %w", d.key, err)
+			}
+			*d.target = parsed
+		}
+	}
+	if cfg.accessTokenHelperTimeout <= 0 {
+		return fmt.Errorf("youzone: access_token_helper_timeout must be > 0")
+	}
+	if cfg.accessTokenTTL <= 0 {
+		return fmt.Errorf("youzone: access_token_ttl must be > 0")
+	}
+	if cfg.accessTokenRefreshBefore < 0 {
+		return fmt.Errorf("youzone: access_token_refresh_before must be >= 0")
+	}
+	if cfg.accessTokenRefreshBefore >= cfg.accessTokenTTL {
+		return fmt.Errorf("youzone: access_token_refresh_before (%s) must be less than access_token_ttl (%s)",
+			cfg.accessTokenRefreshBefore, cfg.accessTokenTTL)
+	}
+	return nil
 }
 
 func defaultString(v, fallback string) string {
