@@ -229,19 +229,15 @@ cc-connect daemon status
 cc-connect daemon logs -f
 ```
 
-`daemon install` 会捕获配置中的 `${ENV}` 占位符，以及 yms-rca profile 里 `mcp.token_env` 声明的环境变量，并写入 launchd、systemd 或 Windows Task Scheduler 的服务文件。服务文件权限会按 owner-only 创建，但同一系统用户下运行的进程仍可能读取到这些值。
+`daemon install` 默认只捕获代理相关环境变量，不再扫描配置中的 `${ENV}` 占位符，也不再扫描 yms-rca profile 里 `mcp.token_env` 声明的环境变量。Token 请通过部署脚本或系统服务管理器注入到 cc-connect 进程环境。
 
-如果你不希望 cc-connect 捕获 secret，请改用系统服务管理器自己的密钥注入方式，并安装时加：
-
-```bash
-cc-connect daemon install --config ~/.cc-connect/config.toml --force --no-capture-secrets
-```
-
-新增 yms-rca profile 或新增 `mcp.token_env` 之后，需要重新执行：
+安装命令保持为：
 
 ```bash
 cc-connect daemon install --config ~/.cc-connect/config.toml --force
 ```
+
+新增 yms-rca profile 或新增 `mcp.token_env` 之后，不需要为了捕获 secret 重新执行 `daemon install`；但部署脚本或服务管理器必须在用户选择该 profile 前注入对应环境变量。
 
 只执行 `cc-connect daemon restart` 不会重新生成服务文件，也不会捕获新增环境变量。
 
