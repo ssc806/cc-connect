@@ -1843,6 +1843,51 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Cloud AgentRoute / 云端 agent-route
+# =============================================================================
+# `agentroute` connects cc-connect to a cloud `agent-route` service over
+# WebSocket + JSON-RPC 2.0 and uses it as a remote agent. cc-connect keeps all
+# IM platform handling locally; agent-route owns cloud session management,
+# agent routing, provisioning, and runtime fan-out.
+# `agentroute` 通过 WebSocket + JSON-RPC 2.0 连接云端 `agent-route` 服务，把它
+# 当作远程 agent 使用。cc-connect 仍在本地处理 IM 平台；agent-route 负责云端
+# 会话管理、路由、provisioning 和 runtime 分发。
+#
+# Security / 安全:
+#   Keep the token in an environment variable or a credential store — never
+#   commit it. `${AGENT_ROUTE_TOKEN}` is expanded from the environment at load.
+#   token 请放在环境变量或凭证库里，不要提交到仓库。`${AGENT_ROUTE_TOKEN}`
+#   会在加载时从环境变量展开。
+#
+# Limitation / 当前限制:
+#   Large attachments need object-storage support, which is not in the first
+#   milestone — only the message shape is in place.
+#   大附件需要对象存储支持，首个里程碑尚未实现，仅保留了消息结构。
+
+# [[projects]]
+# name = "cloud-agent-route"
+#
+# [projects.agent]
+# type = "agentroute"
+#
+# [projects.agent.options]
+# url = "wss://agent-route.example.com/v1/agent-sessions"  # required / 必填 (ws:// or wss://)
+# token = "${AGENT_ROUTE_TOKEN}"                           # required / 必填
+# project = "cc-connect"                                   # routing hint / 路由提示
+# workspace = "github.com/ssc806/cc-connect"               # logical workspace key / 逻辑工作区键
+# default_agent = "codex"                                  # hint; server may override / 提示，服务端可覆盖
+# connect_timeout_secs = 15                                # dial + handshake budget / 拨号+握手预算
+# request_timeout_secs = 120                               # per-call budget / 单次调用预算
+# heartbeat_interval_secs = 30
+# resume = true
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
