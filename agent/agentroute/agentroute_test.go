@@ -196,6 +196,27 @@ func TestListSessions_MapsRemoteSessions(t *testing.T) {
 	}
 }
 
+func TestListSessions_FallsBackToCCProjectFromSessionEnv(t *testing.T) {
+	fs := newFakeServer(t)
+	ag, err := New(map[string]any{"url": fs.dialURL(), "token": testToken}) // no "project" option
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ag.(core.SessionEnvInjector).SetSessionEnv([]string{"CC_PROJECT=from-env"})
+
+	if _, err := ag.ListSessions(context.Background()); err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	// session.list must scope to the same project StartSession resolves, or a
+	// session created under the CC_PROJECT fallback would be invisible to /list.
+	var p sessionListParams
+	fs.lastParams(t, methodSessionList, &p)
+	if p.Project != "from-env" {
+		t.Errorf("session.list project = %q, want fallback to CC_PROJECT", p.Project)
+	}
+}
+
 func TestStartSession_ConnectErrorDoesNotLeakToken(t *testing.T) {
 	fs := newFakeServer(t)
 	fs.rejectAuth = true

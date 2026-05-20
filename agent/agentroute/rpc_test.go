@@ -158,11 +158,12 @@ func (*deadlineConn) Close() error          { return nil }
 func TestRPC_WriteCarriesDeadline(t *testing.T) {
 	dc := &deadlineConn{}
 	c := &rpcClient{
-		conn:    dc,
-		opts:    options{requestTimeout: 30 * time.Second},
-		pending: map[string]chan rpcResponse{},
-		events:  make(chan sessionEventNotification, 1),
-		closed:  make(chan struct{}),
+		conn:     dc,
+		opts:     options{requestTimeout: 30 * time.Second},
+		pending:  map[string]chan rpcResponse{},
+		events:   make(chan sessionEventNotification, 1),
+		closed:   make(chan struct{}),
+		writeSem: make(chan struct{}, 1),
 	}
 
 	// No read loop runs, so the call times out waiting for a response — but
@@ -181,11 +182,12 @@ func TestRPC_WriteCarriesDeadline(t *testing.T) {
 
 func TestRPC_WriteFailureFailsClient(t *testing.T) {
 	c := &rpcClient{
-		conn:    errWriteConn{},
-		opts:    options{requestTimeout: time.Second},
-		pending: map[string]chan rpcResponse{},
-		events:  make(chan sessionEventNotification, 1),
-		closed:  make(chan struct{}),
+		conn:     errWriteConn{},
+		opts:     options{requestTimeout: time.Second},
+		pending:  map[string]chan rpcResponse{},
+		events:   make(chan sessionEventNotification, 1),
+		closed:   make(chan struct{}),
+		writeSem: make(chan struct{}, 1),
 	}
 
 	var res pingResult
@@ -200,6 +202,77 @@ func TestRPC_WriteFailureFailsClient(t *testing.T) {
 	default:
 		t.Fatal("a failed write must fail the client so Done() is closed")
 	}
+}
+
+// blockingWriteConn blocks inside WriteJSON until release is closed, so a test
+// can pin the write slot and verify a later bounded write is not stalled past
+// its own timeout. entered signals that WriteJSON has been reached.
+type blockingWriteConn struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*blockingWriteConn) ReadJSON(any) error               { return errors.New("blockingWriteConn: read not used") }
+func (*blockingWriteConn) SetWriteDeadline(time.Time) error { return nil }
+func (bc *blockingWriteConn) WriteJSON(any) error {
+	select {
+	case bc.entered <- struct{}{}:
+	default:
+	}
+	<-bc.release
+	return nil
+}
+func (*blockingWriteConn) Close() error { return nil }
+
+// TestRPC_BoundedCallNotStalledByStuckWriter covers the Close() path: a normal
+// RPC write stuck inside WriteJSON holds the write slot, and a later call with
+// a small timeout (mirroring closeRPCTimeout) must still return near its own
+// budget instead of waiting for the stuck writer.
+func TestRPC_BoundedCallNotStalledByStuckWriter(t *testing.T) {
+	bc := &blockingWriteConn{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	c := &rpcClient{
+		conn:     bc,
+		opts:     options{requestTimeout: 30 * time.Second},
+		pending:  map[string]chan rpcResponse{},
+		events:   make(chan sessionEventNotification, 1),
+		closed:   make(chan struct{}),
+		writeSem: make(chan struct{}, 1),
+	}
+
+	// A normal RPC write grabs the slot and stalls inside WriteJSON.
+	stuck := make(chan error, 1)
+	go func() {
+		var res pingResult
+		stuck <- c.callWithTimeout(context.Background(), 30*time.Second, methodPing, pingParams{}, &res)
+	}()
+	select {
+	case <-bc.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first writer never reached WriteJSON")
+	}
+
+	// The bounded call must not wait for the stuck writer beyond its timeout.
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		var res sessionCancelResult
+		done <- c.callWithTimeout(context.Background(), 100*time.Millisecond, methodSessionCancel, sessionCancelParams{}, &res)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("bounded call should fail while the write slot is held by a stuck writer")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("bounded call waited %s, want it bounded near its 100ms timeout", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bounded call was not bounded — it waited for the stuck writer to finish")
+	}
+
+	close(bc.release) // let the stuck writer unwind
+	<-stuck
 }
 
 func TestRPC_CloseFailsInFlightCalls(t *testing.T) {

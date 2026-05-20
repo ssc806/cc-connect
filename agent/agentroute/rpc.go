@@ -37,7 +37,10 @@ type rpcClient struct {
 	conn websocketConn
 	opts options
 
-	writeMu sync.Mutex
+	// writeSem is a cap-1 semaphore serializing writes. Unlike a sync.Mutex it
+	// can be acquired with a timeout, so a bounded caller (notably Close()) is
+	// never stalled past its budget by a previous write stuck inside WriteJSON.
+	writeSem chan struct{}
 
 	pendingMu sync.Mutex
 	pending   map[string]chan rpcResponse
@@ -74,11 +77,12 @@ func newRPCClient(ctx context.Context, opts options) (*rpcClient, error) {
 	}
 
 	c := &rpcClient{
-		conn:    conn,
-		opts:    opts,
-		pending: map[string]chan rpcResponse{},
-		events:  make(chan sessionEventNotification, 64),
-		closed:  make(chan struct{}),
+		conn:     conn,
+		opts:     opts,
+		pending:  map[string]chan rpcResponse{},
+		events:   make(chan sessionEventNotification, 64),
+		closed:   make(chan struct{}),
+		writeSem: make(chan struct{}, 1),
 	}
 	go c.readLoop()
 
@@ -284,18 +288,33 @@ func (c *rpcClient) heartbeat() {
 	}
 }
 
-// writeJSON serializes one frame onto the connection, bounded by a write
-// deadline derived from timeout so a stalled socket cannot block longer than
-// the caller's RPC budget. The deadline is set under writeMu together with the
-// write so concurrent callers cannot clobber each other's deadline. A timeout
-// of 0 clears any deadline (unbounded write).
+// writeJSON serializes one frame onto the connection. Both acquiring the write
+// slot AND the write itself are bounded by timeout: a caller — notably the
+// bounded Close() path — cannot be stalled past its budget by a previous write
+// stuck inside WriteJSON while holding the slot. The deadline is absolute, so
+// any time spent waiting for the slot is charged against the same budget, and
+// it is set only once the slot is held so concurrent callers cannot clobber
+// each other's deadline. A timeout of 0 leaves both the slot wait and the
+// write unbounded.
 func (c *rpcClient) writeJSON(v any, timeout time.Duration) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	var deadline time.Time
+	var slotTimeout <-chan time.Time
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		slotTimeout = timer.C
 	}
+
+	select {
+	case c.writeSem <- struct{}{}:
+		defer func() { <-c.writeSem }()
+	case <-c.closed:
+		return errClientClosed
+	case <-slotTimeout:
+		return fmt.Errorf("write blocked: a previous write did not complete within %s", timeout)
+	}
+
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
 		return err
 	}

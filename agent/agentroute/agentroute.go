@@ -93,20 +93,32 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 }
 
+// effectiveOptions returns a.opts with the §3 default rule applied: when no
+// project was configured, the CC_PROJECT value captured from the session env
+// is used. StartSession and ListSessions must resolve the project the same
+// way — otherwise a session created under the CC_PROJECT fallback would be
+// invisible to a /list query that sent an empty project.
+func (a *Agent) effectiveOptions() options {
+	a.mu.Lock()
+	ccProject := a.ccProject
+	a.mu.Unlock()
+
+	opts := a.opts
+	if opts.project == "" && ccProject != "" {
+		opts.project = ccProject
+	}
+	return opts
+}
+
 // StartSession creates or resumes a route session. sessionID is the
 // agent-route session_id the engine persisted; it is used as
 // resume_session_id (it is NOT the local cc_connect_session_id).
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	ccSessionKey := a.ccSessionKey
-	ccProject := a.ccProject
 	a.mu.Unlock()
 
-	opts := a.opts
-	// §3 default rule: fall back to CC_PROJECT when project was not configured.
-	if opts.project == "" && ccProject != "" {
-		opts.project = ccProject
-	}
+	opts := a.effectiveOptions()
 
 	client, err := newRPCClient(ctx, opts)
 	if err != nil {
@@ -123,15 +135,16 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 // ListSessions returns the route sessions visible to the authenticated
 // cc-connect project. It opens a short-lived connection for the query.
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
-	client, err := newRPCClient(ctx, a.opts)
+	opts := a.effectiveOptions()
+	client, err := newRPCClient(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("agentroute: connect: %w", err)
 	}
 	defer client.Close()
 
 	params := sessionListParams{
-		Project:   a.opts.project,
-		Workspace: a.opts.workspace,
+		Project:   opts.project,
+		Workspace: opts.workspace,
 		Limit:     50,
 	}
 	var res sessionListResult
