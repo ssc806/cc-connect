@@ -275,6 +275,49 @@ func TestRPC_BoundedCallNotStalledByStuckWriter(t *testing.T) {
 	<-stuck
 }
 
+// slowWriteConn delays inside WriteJSON, then succeeds — it models a write that
+// completes only near the call's deadline, leaving little budget for the
+// response wait that follows.
+type slowWriteConn struct {
+	delay time.Duration
+}
+
+func (*slowWriteConn) ReadJSON(any) error               { return errors.New("slowWriteConn: read not used") }
+func (*slowWriteConn) SetWriteDeadline(time.Time) error { return nil }
+func (sc *slowWriteConn) WriteJSON(any) error           { time.Sleep(sc.delay); return nil }
+func (*slowWriteConn) Close() error                     { return nil }
+
+// TestRPC_CallTimeoutIsSingleBudget verifies callWithTimeout spends one
+// end-to-end budget: a write that completes near the deadline must leave the
+// response wait only the remainder, not a fresh full timeout. Without the
+// shared absolute deadline the call would take ≈delay + timeout.
+func TestRPC_CallTimeoutIsSingleBudget(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	c := &rpcClient{
+		conn:     &slowWriteConn{delay: 250 * time.Millisecond},
+		opts:     options{requestTimeout: 30 * time.Second},
+		pending:  map[string]chan rpcResponse{},
+		events:   make(chan sessionEventNotification, 1),
+		closed:   make(chan struct{}),
+		writeSem: make(chan struct{}, 1),
+	}
+
+	// No read loop runs, so no response arrives: the call can only end on the
+	// timeout. The write burns 250ms of the 300ms budget; the response wait
+	// must get the ~50ms remainder, so the whole call stays near 300ms — not
+	// 250ms + a fresh 300ms.
+	start := time.Now()
+	var res pingResult
+	err := c.callWithTimeout(context.Background(), timeout, methodPing, pingParams{}, &res)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a timeout error when no response arrives")
+	}
+	if elapsed > timeout+150*time.Millisecond {
+		t.Errorf("call took %s, want it bounded near one %s budget; the response wait got a fresh timeout", elapsed, timeout)
+	}
+}
+
 func TestRPC_CloseFailsInFlightCalls(t *testing.T) {
 	fs := newFakeServer(t)
 	fs.startDelay = 3 * time.Second // server stalls the response

@@ -174,10 +174,16 @@ func (c *rpcClient) callWithTimeout(ctx context.Context, timeout time.Duration, 
 		c.pendingMu.Unlock()
 	}()
 
-	// The write is bounded by the call's own timeout: a stalled socket must
-	// not block here before the response timer below even starts, otherwise a
-	// stuck write would slip past callWithTimeout and the bounded Close() path.
-	if err := c.writeJSON(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}, timeout); err != nil {
+	// One absolute deadline spans the whole RPC — write-slot wait, the write,
+	// and the response wait below — so callWithTimeout(T) is bounded by ~T, not
+	// ~2T (≈T to write, then a fresh T waiting for the response). The bounded
+	// Close() path (closeRPCTimeout) depends on this end-to-end budget.
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+
+	if err := c.writeJSON(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}, deadline); err != nil {
 		// A failed WebSocket write means the connection is unusable. Fail the
 		// client now so Alive() flips immediately and the engine recycles the
 		// session, instead of leaving it marked alive until the read loop or
@@ -187,8 +193,10 @@ func (c *rpcClient) callWithTimeout(ctx context.Context, timeout time.Duration, 
 	}
 
 	var timeoutCh <-chan time.Time
-	if timeout > 0 {
-		timer := time.NewTimer(timeout)
+	if !deadline.IsZero() {
+		// time.Until is already negative when the write consumed the whole
+		// budget; NewTimer then fires immediately, which is the intent.
+		timer := time.NewTimer(time.Until(deadline))
 		defer timer.Stop()
 		timeoutCh = timer.C
 	}
@@ -288,20 +296,17 @@ func (c *rpcClient) heartbeat() {
 	}
 }
 
-// writeJSON serializes one frame onto the connection. Both acquiring the write
-// slot AND the write itself are bounded by timeout: a caller — notably the
+// writeJSON serializes one frame onto the connection. Acquiring the write slot
+// AND the write itself must finish before deadline: a caller — notably the
 // bounded Close() path — cannot be stalled past its budget by a previous write
-// stuck inside WriteJSON while holding the slot. The deadline is absolute, so
-// any time spent waiting for the slot is charged against the same budget, and
-// it is set only once the slot is held so concurrent callers cannot clobber
-// each other's deadline. A timeout of 0 leaves both the slot wait and the
-// write unbounded.
-func (c *rpcClient) writeJSON(v any, timeout time.Duration) error {
-	var deadline time.Time
+// stuck inside WriteJSON while holding the slot. deadline is absolute and
+// shared with the caller's response wait, so the whole RPC stays within one
+// budget rather than getting a fresh one per phase. A zero deadline leaves
+// both the slot wait and the write unbounded.
+func (c *rpcClient) writeJSON(v any, deadline time.Time) error {
 	var slotTimeout <-chan time.Time
-	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
-		timer := time.NewTimer(timeout)
+	if !deadline.IsZero() {
+		timer := time.NewTimer(time.Until(deadline))
 		defer timer.Stop()
 		slotTimeout = timer.C
 	}
@@ -312,7 +317,7 @@ func (c *rpcClient) writeJSON(v any, timeout time.Duration) error {
 	case <-c.closed:
 		return errClientClosed
 	case <-slotTimeout:
-		return fmt.Errorf("write blocked: a previous write did not complete within %s", timeout)
+		return errors.New("write blocked: a previous write did not complete before the deadline")
 	}
 
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
