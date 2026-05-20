@@ -2,10 +2,9 @@
 //
 // These helpers read ~/.yms-rca/connections/*.yaml to discover the
 // environment variable names referenced by each profile's
-// mcp.token_env field. Used both at runtime (when the user issues
-// /connect <name>) and at install time (the daemon.EnvDiscoverer
-// registered in cmd/cc-connect/plugin_agent_yms_rca.go invokes
-// DiscoverDaemonEnv to bake token values into the service file).
+// mcp.token_env field. Used at runtime when the user issues /connect <name>.
+// Deployment helpers may also call DiscoverDaemonEnv when they need to
+// construct a service-manager environment explicitly.
 package ymsagent
 
 import (

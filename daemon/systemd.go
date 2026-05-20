@@ -59,19 +59,8 @@ func (m *systemdManager) Install(cfg Config) error {
 	}
 
 	unit := m.buildUnit(cfg)
-	// 0600: unit file may contain captured secret values (config.toml ${ENV}
-	// placeholders and any EnvDiscoverer extension output). For system-level units
-	// (/etc/systemd/system/)
-	// the file is owned by root and remains readable by root only; for
-	// user-level units under ~/.config/systemd/user it remains owner-only.
-	// WriteFile only applies perm on create, so Chmod afterwards is
-	// required to harden reinstalls of pre-existing 0644 units from
-	// earlier cc-connect versions.
-	if err := os.WriteFile(unitPath, []byte(unit), 0600); err != nil {
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
-	}
-	if err := os.Chmod(unitPath, 0600); err != nil {
-		return fmt.Errorf("chmod unit file: %w", err)
 	}
 
 	for _, cmdArgs := range [][]string{
@@ -195,16 +184,7 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if !isValidEnvName(key) {
-				slog.Warn("daemon: systemd: dropping invalid env name from EnvExtra",
-					"key", key)
-				continue
-			}
-			value := cfg.EnvExtra[key]
-			if value == "" {
-				continue
-			}
-			fmt.Fprintf(&sb, "Environment=\"%s=%s\"\n", key, escapeSystemdEnvValue(value))
+			fmt.Fprintf(&sb, "Environment=\"%s=%s\"\n", key, cfg.EnvExtra[key])
 		}
 	}
 	sb.WriteString("\n[Install]\n")
@@ -216,35 +196,7 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	return sb.String()
 }
 
-// escapeSystemdEnvValue prepares a value for inclusion inside the double
-// quotes of an `Environment="KEY=VALUE"` directive. Per systemd.exec(5),
-// backslashes and double quotes need escaping; literal newlines and tabs
-// must be encoded as `\n` / `\t` so the unit file remains a single line.
-func escapeSystemdEnvValue(v string) string {
-	var b strings.Builder
-	b.Grow(len(v))
-	for _, r := range v {
-		switch r {
-		case '\\':
-			b.WriteString(`\\`)
-		case '"':
-			b.WriteString(`\"`)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-// runSystemctl is a var (not a func) so tests can stub it without
-// requiring a real systemctl process on the test host.
-var runSystemctl = func(args ...string) (string, error) {
+func runSystemctl(args ...string) (string, error) {
 	cmd := exec.Command("systemctl", args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
@@ -327,4 +279,30 @@ func parseKeyValue(text string) map[string]string {
 		m[parts[0]] = parts[1]
 	}
 	return m
+}
+
+// CheckLinger returns true if linger is enabled for the user, false otherwise.
+// If linger is not enabled, user-level systemd services will stop when
+// the user's last login session ends (e.g., SSH disconnect).
+func CheckLinger() (enabled bool, user string) {
+	user = os.Getenv("USER")
+	if user == "" {
+		user = "unknown"
+	}
+
+	// Check if we're in system mode (root)
+	if os.Getuid() == 0 {
+		return true, user // Linger check not relevant for system mode
+	}
+
+	// Check linger status via loginctl
+	out, err := exec.Command("loginctl", "show-user", user, "-p", "Linger").Output()
+	if err != nil {
+		// loginctl not available or error - assume linger is disabled
+		slog.Debug("linger check failed", "error", err)
+		return false, user
+	}
+
+	linger := strings.TrimSpace(string(out))
+	return linger == "Linger=yes", user
 }
